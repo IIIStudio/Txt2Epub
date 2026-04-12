@@ -1,8 +1,16 @@
 $:
   vscode:
     - docker:
-        # 指定云原生开发启动时的基础镜像为当前镜像
-        image: docker.cnb.cool/ohao/learn/python:3.12.11
+        image: docker.cnb.cool/iiistudio/os/docker/python:3.12.11
       services:
         - vscode
         - docker
+main:
+  web_trigger:
+    - runner:
+        cpus: 1
+      stages:
+        - name: 测回
+          script: |
+            git reset --hard ${commit}
+            git push -f origin main
