@@ -6,6 +6,24 @@ $:
         - vscode
         - docker
 main:
+  push:
+    - services:
+        - docker
+      imports:
+        - https://cnb.cool/IIIStudio/key/-/blob/main/github/env.yml
+      stages:
+        - name: 同步到GitHub
+          image: tencentcom/git-sync 
+          settings:
+            target_url: https://github.com/IIIStudio/Txt2Epub.git
+            auth_type: https
+            git_user: ${GIT_USERNAME}
+            git_email: ${GIT_EMAIL} 
+            username: ${GIT_USERNAME} 
+            password: ${GIT_ACCESS_TOKEN}
+            branch: main
+            # sync_mode: mirror
+            force: true
   web_trigger:
     - runner:
         cpus: 1
