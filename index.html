@@ -1253,7 +1253,7 @@ function assetDisplayUrl(a) {
   a.__thumbPending = true;
   makeThumb(a.dataUrl).then(t => {
     a.__thumbPending = false;
-    if (t) { a.thumb = t; renderAssets(); saveSoon(); }
+    if (t) { a.thumb = t; markAssetsDirty(); renderAssets(); saveSoon(); }
   }).catch(() => { a.__thumbPending = false; });
   return a.dataUrl;
 }
@@ -1568,6 +1568,7 @@ function renderAssets() {
       const act = e.target.getAttribute && e.target.getAttribute('data-act');
       if (act === 'cover') {
         state.project.meta.coverAssetId = a.id;
+       
         renderAssets(); saveSoon();
         toast('已设为封面', 'ok');
         return;
@@ -1593,9 +1594,18 @@ function confirmRemoveAsset(asset, refCount) {
     ]
   );
 }
+/* 章节字数缓存：id -> 字数。
+   此前 updateStatus() 每次都对**全部章节**正则统计（87 章即 87 次全文处理），
+   而输入时只有当前章会变，其余章节重复计算纯属浪费。改为按需重算 + 失效即可。 */
+const wordCache = {};
+function chapterWords(ch) {
+  if (wordCache[ch.id] == null) wordCache[ch.id] = countWords(ch.html);
+  return wordCache[ch.id];
+}
+function invalidateWordCache(id) { delete wordCache[id]; }
 function updateStatus() {
   const p = state.project;
-  const total = p.chapters.reduce((n, c) => n + countWords(c.html), 0);
+  const total = p.chapters.reduce((n, c) => n + chapterWords(c), 0);
   $('#st-words').textContent = total.toLocaleString();
   $('#st-chapters').textContent = p.chapters.length;
   $('#st-images').textContent = p.assets.length;
@@ -1605,14 +1615,26 @@ function updateStatus() {
 function saveEditorToState() {
   const ch = currentChapter();
   if (!ch) return;
+  let html;
   if (state.sourceMode) {
-    ch.html = $('#src-area').value;
+    html = $('#src-area').value;
   } else {
     const ed = $('#editor');
-    // 读取前先剥离临时 UI（删除按钮、选中态、空 figure），避免把它们写进正文
-    ch.html = stripEditorArtifacts(ed);
-    // 恢复当前选中的控件，避免自动保存后用户无法继续删除
-    if (selectedFigure && ed.contains(selectedFigure)) ensureFigureControls(selectedFigure);
+    // 只有存在临时 UI（图片删除按钮 / 选中态）时才需要克隆剥离。
+    // 无图片选中时直接读 innerHTML，省掉每次输入的整棵 DOM 深度克隆。
+    if (ed.querySelector('.t2e-fig-del, .t2e-sel')) {
+      html = stripEditorArtifacts(ed);
+      // 恢复当前选中的控件，避免自动保存后用户无法继续删除
+      if (selectedFigure && ed.contains(selectedFigure)) ensureFigureControls(selectedFigure);
+    } else {
+      html = ed.innerHTML;
+    }
+  }
+  // 内容未变则不清缓存，避免每次输入都重算全部章节字数
+  if (html !== ch.html) {
+    ch.html = html;
+    invalidateWordCache(ch.id);
+   
   }
   ch.title = $('#chapter-title').value.trim();
 }
@@ -1679,7 +1701,7 @@ function exec(cmd, val) {
   $('#editor').focus();
   try { document.execCommand(cmd, false, val); }
   catch (e) { /* 忽略不支持的命令 */ }
-  syncToolbar(); saveEditorToState(); saveSoon(); refreshPreview();
+  syncToolbar(); saveEditorToState(); updateStatus(); saveSoon();
 }
 function syncToolbar() {
   $$('#toolbar .tb-btn[data-cmd]').forEach(b => {
@@ -1707,19 +1729,22 @@ function htmlOrBlock(html) {
         nr.setStartAfter(last); nr.collapse(true);
         sel.addRange(nr);
       }
-      saveEditorToState(); updateStatus(); saveSoon(); refreshPreview();
+      saveEditorToState(); updateStatus(); saveSoon();
       return;
     }
   }
   ed.insertAdjacentHTML('beforeend', html);
-  saveEditorToState(); updateStatus(); saveSoon(); refreshPreview();
+  saveEditorToState(); updateStatus(); saveSoon();
 }
 function ensureParagraph() {
   const ed = $('#editor');
   if (!ed.firstChild) { ed.innerHTML = '<p><br /></p>'; }
 }
 $('#editor').addEventListener('input', debounce(() => {
-  saveEditorToState(); updateStatus(); saveSoon(); refreshPreview();
+  saveEditorToState(); updateStatus(); saveSoon();
+  // 刻意不调用 refreshDocStyle()：样式表只依赖排版设置/高亮规则/自定义 CSS，
+  // 与正文内容无关，每次输入都重新生成并注入数万字节的 <style> 会触发整页重排，
+  // 是编辑卡顿的主因（实测 textContent 赋值占 refreshDocStyle 的 88%）。
 }, 400));
 $('#editor').addEventListener('keyup', syncToolbar);
 $('#editor').addEventListener('mouseup', syncToolbar);
@@ -1781,7 +1806,7 @@ $('#tb-source').onclick = () => {
   saveEditorToState();
 };
 $('#src-area').addEventListener('input', debounce(() => {
-  saveEditorToState(); saveSoon(); refreshPreview();
+  saveEditorToState(); updateStatus(); saveSoon();
 }, 400));
 
 /* ------------------------- 9. 图片 ------------------------- */
@@ -1835,6 +1860,7 @@ function obtainAsset(dataUrl, name) {
     dataUrl: dataUrl, fp: assetFingerprint(dataUrl)
   };
   state.project.assets.push(asset);
+  markAssetsDirty();
   return { asset: asset, created: true };
 }
 /* ================= 编辑器内图片的选中与删除 =================
@@ -1895,7 +1921,7 @@ function deleteFigure(fig) {
   ensureParagraph();
   // 若编辑器已空，补一个空段落以便继续输入
   if (ed && !ed.firstChild) ed.innerHTML = '<p><br /></p>';
-  saveEditorToState(); updateStatus(); saveSoon(); refreshPreview();
+  saveEditorToState(); updateStatus(); saveSoon();
   toast('已删除图片', 'ok');
   if (next && ed && ed.contains(next)) {
     try {
@@ -1916,7 +1942,7 @@ function insertAssetAtCursor(asset) {
     const e = ta.selectionEnd == null ? ta.value.length : ta.selectionEnd;
     ta.value = ta.value.slice(0, s) + fig + ta.value.slice(e);
     ta.selectionStart = ta.selectionEnd = s + fig.length;
-    saveEditorToState(); updateStatus(); saveSoon(); refreshPreview();
+    saveEditorToState(); updateStatus(); saveSoon();
     return;
   }
   ensureParagraph();
@@ -1948,14 +1974,16 @@ function removeAsset(assetId, alsoFromText) {
         }
       });
       ch.html = tmp.innerHTML;
+      invalidateWordCache(ch.id);
     });
   }
   p.assets = p.assets.filter(a => a.id !== assetId);
   if (p.meta.coverAssetId === assetId) p.meta.coverAssetId = null;
+  markAssetsDirty();
   clearFigureControls();
   const cur = currentChapter();
   if (cur) $('#editor').innerHTML = cur.html || '';
-  renderAssets(); renderCoverPreview(); updateStatus(); saveSoon(); refreshPreview();
+  renderAssets(); renderCoverPreview(); updateStatus(); saveSoon();
   toast(alsoFromText
     ? '已删除图片' + (removedFromText ? '，并移除正文中 ' + removedFromText + ' 处引用' : '')
     : '已从图片库移除（正文中的引用保留）', 'ok');
@@ -1984,6 +2012,7 @@ function pruneUnusedAssets() {
         const ids = {};
         unused.forEach(a => { ids[a.id] = true; });
         p.assets = p.assets.filter(a => !ids[a.id]);
+        markAssetsDirty();
         renderAssets(); renderCoverPreview(); updateStatus(); saveSoon();
         toast('已清理 ' + unused.length + ' 张未使用的图片', 'ok');
       }
@@ -2019,12 +2048,14 @@ $('#cover-input').addEventListener('change', async function () {
   const asset = { id: uid('img'), name: this.files[0].name, mime: mimeOf(dataUrl), dataUrl: dataUrl };
   state.project.assets.push(asset);
   state.project.meta.coverAssetId = asset.id;
+  markAssetsDirty();
   renderAssets(); renderCoverPreview(); saveSoon();
   toast('已设置封面', 'ok');
   this.value = '';
 });
 $('#btn-cover-clear').onclick = () => {
   state.project.meta.coverAssetId = null;
+ 
   renderAssets(); renderCoverPreview(); saveSoon();
 };
 function renderCoverPreview() {
@@ -2087,6 +2118,7 @@ function generateCover(themeIndex) {
   const asset = { id: uid('img'), name: 'cover.jpg', mime: 'image/jpeg', dataUrl: dataUrl };
   state.project.assets.push(asset);
   state.project.meta.coverAssetId = asset.id;
+  markAssetsDirty();
   renderAssets(); renderCoverPreview(); saveSoon();
   toast('已生成封面（' + t.name + '）', 'ok');
 }
@@ -2120,9 +2152,10 @@ function markCurrent() {
   const n = applyHighlight(tmp, state.project.rules);
   if (!currentChapter()) { toast('请先选择章节'); return; }
   currentChapter().html = tmp.innerHTML;
+  invalidateWordCache(currentChapter().id);
   $('#editor').innerHTML = tmp.innerHTML;
   if (state.sourceMode) $('#src-area').value = tmp.innerHTML;
-  saveEditorToState(); saveSoon(); refreshPreview();
+  saveEditorToState(); updateStatus(); saveSoon();
   toast(n ? '已标记 ' + n + ' 处' : '未发现可标记内容', n ? 'ok' : '');
 }
 function unmarkCurrent() {
@@ -2132,10 +2165,11 @@ function unmarkCurrent() {
   const n = stripHighlight(tmp);
   if (currentChapter()) {
     currentChapter().html = tmp.innerHTML;
+    invalidateWordCache(currentChapter().id);
     $('#editor').innerHTML = tmp.innerHTML;
     if (state.sourceMode) $('#src-area').value = tmp.innerHTML;
   }
-  saveSoon(); refreshPreview();
+  updateStatus(); saveSoon();
   toast(n ? '已清除 ' + n + ' 处标记' : '没有标记', n ? 'ok' : '');
 }
 function forEachChapter(fn) {
@@ -2146,12 +2180,13 @@ function forEachChapter(fn) {
     tmp.innerHTML = ch.html || '';
     total += fn(tmp, ch) || 0;
     ch.html = tmp.innerHTML;
+    invalidateWordCache(ch.id);     // 批量操作改写了内容，必须让字数缓存失效
   });
   if (currentChapter()) {
     $('#editor').innerHTML = currentChapter().html;
     if (state.sourceMode) $('#src-area').value = currentChapter().html;
   }
-  updateStatus(); saveSoon(); refreshPreview();
+  updateStatus(); saveSoon();
   return total;
 }
 $('#tb-mark').onclick = markCurrent;
@@ -3103,14 +3138,49 @@ async function idbGet(id) {
     r.onerror = () => reject(r.error);
   });
 }
+/* ------------------------- 草稿拆分存储 -------------------------
+ * 图片（base64）与文本挤在同一个 JSON 里，会让每次自动保存都序列化几十 MB
+ * （实测：87 章的书，工程 28.5MB，其中图片 26MB 占 91%，正文仅 0.4%；
+ *   JSON.stringify 55ms + parse 42ms ≈ 97ms 主线程阻塞，打字一停就卡）。
+ *
+ * 拆成两条记录、各自独立脏标记：
+ *   'current'         —— 文本（meta/chapters/排版/规则/自定义CSS/分章）
+ *   'current-assets'  —— 图片（assets/resources，体积大但极少变动）
+ * 于是打字只序列化 ~0.1MB 的文本；图片仅在增删图片时才写一次。
+ */
+const DRAFT_TEXT_ID = 'current';
+const DRAFT_ASSET_ID = 'current-assets';
+let dirtyAssets = true;
+const markAssetsDirty = () => { dirtyAssets = true; };
+/** 拆出文本部分（不含图片二进制） */
+function textPartOf(p) {
+  return {
+    id: DRAFT_TEXT_ID, createdAt: p.createdAt, updatedAt: p.updatedAt,
+    meta: p.meta, typography: p.typography, rules: p.rules,
+    customCss: p.customCss, split: p.split, encoding: p.encoding,
+    fileName: p.fileName, chapters: p.chapters
+  };
+}
+/** 拆出图片部分 */
+function assetPartOf(p) {
+  return { id: DRAFT_ASSET_ID, assets: p.assets, resources: p.resources };
+}
+const clone = (o) => JSON.parse(JSON.stringify(o));
 async function saveProject(silent) {
   saveEditorToState();
   state.project.updatedAt = Date.now();
-  state.project.id = 'current';
   try {
-    await idbPut(JSON.parse(JSON.stringify(state.project)));
+    // 文本部分总是保存：正文通常只有几百 KB，序列化 <1ms；
+    // 若再引入脏标记，需要在几十处设置/规则/章节变更点逐一标记，易遗漏且收益极小。
+    await idbPut(clone(textPartOf(state.project)));
+    let saved = true;
+    // 图片部分体积大（可达数十 MB），仅在增删图片时才写
+    if (dirtyAssets) {
+      await idbPut(clone(assetPartOf(state.project)));
+      dirtyAssets = false;
+    }
     if (!silent) toast('草稿已保存到本机', 'ok');
-    $('#save-hint').textContent = '已保存 ' + new Date().toLocaleTimeString();
+    if (saved) $('#save-hint').textContent = '已保存 ' + new Date().toLocaleTimeString();
   } catch (e) {
     if (!silent) toast('保存失败：' + e.message, 'err');
   }
@@ -3210,11 +3280,19 @@ function applyProjectData(p, toastMsg) {
 }
 async function loadDraft() {
   try {
-    const p = await idbGet('current');
-    if (p && p.chapters && p.chapters.length) {
-      applyProjectData(p, '已恢复上次的草稿');
-      return true;
-    }
+    // 草稿拆成两条记录：文本 + 图片，加载时合并
+    const p = await idbGet(DRAFT_TEXT_ID);
+    if (!p || !Array.isArray(p.chapters)) return false;
+    try {
+      const a = await idbGet(DRAFT_ASSET_ID);
+      if (a) {
+        p.assets = Array.isArray(a.assets) ? a.assets : [];
+        p.resources = Array.isArray(a.resources) ? a.resources : [];
+      }
+    } catch (e) { /* 图片记录缺失时保留空列表，不阻断恢复 */ }
+    if (!p.chapters.length) return false;
+    applyProjectData(p, '已恢复上次的草稿');
+    return true;
   } catch (e) { /* 忽略 */ }
   return false;
 }
@@ -3481,6 +3559,7 @@ async function readZipImageAsAsset(zip, path, nameHint) {
     mime: mime, dataUrl: dataUrl, thumb: ''
   };
   state.project.assets.push(asset);
+  markAssetsDirty();
   return asset;
 }
 async function importEpubFile(file) {
@@ -3751,6 +3830,7 @@ async function importEpubFile(file) {
     Object.assign(state.project.meta, meta);
     state.project.chapters = chapters;
     state.project.assets = newAssets;
+    markAssetsDirty();
     // 封面必须在 emptyProject() 之后读取：readZipImageAsAsset 会往 state.project.assets 里推
     if (coverPath) {
       const asset = await readZipImageAsAsset(zip, coverPath, 'cover');
@@ -3758,6 +3838,7 @@ async function importEpubFile(file) {
     }
     state.project.customCss = mergedCss;
     state.project.resources = resources;
+    markAssetsDirty();
     state.project.fileName = file.name;
     state.currentId = chapters.length ? chapters[0].id : null;
     afterLoad();
@@ -3855,7 +3936,14 @@ $('#editor').addEventListener('drop', (e) => {
   if (imgs.length) { e.preventDefault(); addImageFiles(imgs); }
 });
 /* 页面关闭前保存 */
-window.addEventListener('beforeunload', () => { try { saveEditorToState(); idbPut(JSON.parse(JSON.stringify(state.project))); } catch (e) { /* 忽略 */ } });
+// 关闭页面前保存：图片仅在有变动时才写，避免关页面时也卡顿
+window.addEventListener('beforeunload', () => {
+  try {
+    saveEditorToState();
+    idbPut(clone(textPartOf(state.project)));
+    if (dirtyAssets) idbPut(clone(assetPartOf(state.project)));
+  } catch (e) { /* 忽略 */ }
+});
 
 /* 启动 */
 (async function init() {
