@@ -106,6 +106,8 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 .brand .mark{width:22px; height:22px; border-radius:6px; background:var(--primary);
   display:grid; place-items:center; color:#fff; font-size:12px; font-family:var(--font-mono)}
 .brand small{font-weight:500; color:var(--faint); font-size:11px; letter-spacing:.06em; text-transform:uppercase}
+.brand a{color:inherit; text-decoration:none}
+.brand a:hover{text-decoration:underline; text-underline-offset:3px; text-decoration-thickness:2px}
 .topbar .sep{width:1px; height:22px; background:var(--border)}
 .title-input{
   flex:1; max-width:360px; height:32px; padding:0 10px; border:1px solid transparent;
@@ -317,7 +319,7 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
   <header class="topbar">
     <div class="brand">
       <span class="mark">T2E</span>
-      <span>Txt2Epub Studio</span>
+      <a href="https://github.com/IIIStudio/Txt2Epub" target="_blank" rel="noopener noreferrer" title="Txt2Epub Studio on GitHub">Txt2Epub Studio</a>
       <small>Pure Frontend</small>
     </div>
     <div class="sep"></div>
