@@ -244,6 +244,8 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 .rule-card.open .rule-head{background:var(--surface)}
 .rule-card.rule-off{opacity:.55}
 .rule-card.rule-off .rule-swatch{filter:grayscale(1)}
+.color-sample{margin-top:5px; padding:5px 8px; border:1px solid var(--border); border-radius:4px;
+  background:var(--bg); font-size:13px; line-height:1.4}
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:8px}
 .mini-field{display:flex; flex-direction:column; gap:4px}
 .mini-field label{font-size:11px; color:var(--muted); font-weight:600}
@@ -523,11 +525,13 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 
           <div class="section-title">强调色</div>
           <div class="mini-field" style="margin-bottom:8px"><label>标题颜色</label>
-            <div class="chips" id="chips-heading-color"></div></div>
+            <div class="chips" id="chips-heading-color"></div>
+            <div class="color-sample"><span id="sample-heading">标题示例</span></div></div>
           <div class="mini-field"><label>加粗强调（strong）</label>
-            <div class="chips" id="chips-em-color"></div></div>
-          <div class="hint">标题颜色作用于章节标题与正文中的标题；强调色作用于加粗文字。
-            若当前章节没有这些元素，编辑区不会出现变化。</div>
+            <div class="chips" id="chips-em-color"></div>
+            <div class="color-sample"><strong id="sample-em">强调示例</strong></div></div>
+          <div class="hint">标题颜色作用于章节标题与正文标题；强调色作用于加粗文字。
+            上方示例实时反映所选颜色；正文需有对应元素才会变化。</div>
 
           <div class="section-title">封面</div>
           <div class="range-row"><input type="range" id="t-coverwidth" min="30" max="100" step="1" /><span class="val" id="v-coverwidth">62%</span></div>
@@ -1173,17 +1177,18 @@ function userCssText(prefix) {
 }
 
 /* ------------------------- 5. 状态 ------------------------- */
-/* 默认采用国际风（Swiss / International Typographic Style）：
-   · 字体用「系统默认」：零依赖、加载最快、兼容性最好（可切换为 Inter / 思源宋体）
-   · 左对齐、ragged right（中文两端对齐会产生难看的字间距）
-   · 用段间距分隔段落，不用首行缩进
-   · 标题左对齐、负字距、上疏下密
+/* 默认排版（中文电子书常规做法 + 国际风的克制配色）：
+   · 字体用「系统默认」：零依赖、加载最快、兼容性最好
+   · **首行缩进两字符 + 标题居中**：中文电子书的标准做法，默认开启
+     （开启缩进时会自动缩小段间距，避免与缩进重复分隔段落）
+   · 左对齐 ragged right（中文两端对齐会产生难看的字间距，可开关）
+   · 标题负字距、上疏下密、几何短线装饰
    · 强调用字重而非颜色
-   用户仍可在「排版」面板中改为两端对齐、首行缩进、标题居中、衬线字体等。 */
+   用户仍可在「排版」面板中改为两端对齐、无缩进、标题左对齐、衬线字体等。 */
 const DEFAULT_TYPO = {
   font: 'system', theme: 'light', fontSize: 17, lineHeight: 175,
   paraSpacing: 100, margin: 7, imageWidth: 100,
-  indent: false, titleCenter: false, titleSize: 150,
+  indent: true, titleCenter: true, titleSize: 150,
   justify: false,
   headingColor: '', emColor: '', coverWidth: 52
 };
@@ -2242,19 +2247,29 @@ function bindRangeOnce(id, valId, key, fmt) {
   });
 }
 /** 渲染一组颜色 chips 并绑定点击 */
-function bindColorChips(boxSel, list, key) {
+function bindColorChips(boxSel, list, key, sampleSel) {
   const box = $(boxSel);
   box.innerHTML = list.map(c =>
     '<button class="chip" data-color="' + c.key + '"' + (c.hint ? ' title="' + c.hint + '"' : '') + '>' +
     (c.key ? '<span class="dot" style="background:' + c.key + '"></span> ' : '') + c.label + '</button>'
   ).join('');
+  // 同步示例文字颜色：改了设置立刻可见，不必在正文里找对应的标题/加粗元素
+  const syncSample = () => {
+    if (!sampleSel) return;
+    const el = $(sampleSel);
+    const th = DOC_THEMES[state.project.typography.theme] || DOC_THEMES.light;
+    const fallback = (key === 'headingColor') ? th.head : th.fg;
+    const c = state.project.typography[key] || fallback;
+    if (el) el.style.color = c;
+  };
   const sync = () => {
     $$('.chip', box).forEach(x => x.classList.toggle('on', x.getAttribute('data-color') === (state.project.typography[key] || '')));
+    syncSample();
   };
   sync();
   $$('.chip', box).forEach(c => c.onclick = () => {
     state.project.typography[key] = c.getAttribute('data-color');
-    sync(); refreshDocStyle(); refreshPreview(); saveSoon();
+    sync(); refreshDocStyle(); saveSoon();
   });
 }
 /* 事件监听只绑定一次；afterLoad 会在导入 / 加载草稿 / 清空时反复调用 initTypoPanel，
@@ -2264,8 +2279,8 @@ function initTypoPanel() {
   const t = state.project.typography;
   // —— 每次都同步：把 state 的值刷到控件上 ——
   RANGE_FIELDS.forEach(r => syncRange(r[0], r[1], r[2], r[3]));
-  bindColorChips('#chips-heading-color', HEADING_COLORS, 'headingColor');
-  bindColorChips('#chips-em-color', EM_COLORS, 'emColor');
+  bindColorChips('#chips-heading-color', HEADING_COLORS, 'headingColor', '#sample-heading');
+  bindColorChips('#chips-em-color', EM_COLORS, 'emColor', '#sample-em');
   const customCssEl = $('#t-customcss');
   customCssEl.value = state.project.customCss || '';
   const ind = $('#t-indent'), tc = $('#t-titlecenter'), jf = $('#t-justify');
