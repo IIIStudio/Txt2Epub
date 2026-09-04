@@ -218,7 +218,11 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 .editor-surface figure:hover .t2e-fig-del,
 .editor-surface figure.t2e-sel .t2e-fig-del{display:flex}
 .editor-surface figure .t2e-fig-del:hover{background:#B91C1C}
-.editor-surface figure.t2e-sel .t2e-fig-del{display:flex}
+/* 长章节打字流畅度的关键：跳过屏幕外段落的布局与绘制，
+   编辑时渲染量只与可视区域成正比，而不是整章 DOM 规模。 */
+@supports (content-visibility:auto){
+  .editor-surface > *{content-visibility:auto; contain-intrinsic-size:auto 2.4em}
+}
 .src-area{
   width:100%; min-height:60vh; font-family:var(--font-mono); font-size:13px; line-height:1.7;
   border:1px solid var(--border); border-radius:var(--r-sm); padding:14px; background:var(--surface-2);
@@ -1483,6 +1487,13 @@ function refreshDocStyle() {
   const wrap = $('#editor-wrap');
   if (wrap) wrap.style.background = th.bg === '#FFFFFF' ? 'var(--surface)' : th.bg;
 }
+/* 拖动滑块会连续触发 input：每个 tick 都重新生成并注入整张样式表，
+   会让长文档连续全页重排（拖滑块卡死的主因）。按帧节流，每帧最多一次。 */
+let docStyleRaf = 0;
+function refreshDocStyleSoon() {
+  if (docStyleRaf) return;
+  docStyleRaf = requestAnimationFrame(() => { docStyleRaf = 0; refreshDocStyle(); });
+}
 /**
  * 章节标题输入框的样式。
  * 编辑区的标题是 <input>（不支持伪元素），无法直接用 h1.chapter-title::before，
@@ -1546,14 +1557,19 @@ function renderAssets() {
   $('#asset-empty').style.display = assets.length ? 'none' : 'block';
   const cnt = $('#asset-count');
   if (cnt) cnt.textContent = assets.length;
+  // 引用统计单趟完成：逐章一次正则扫描计数。
+  // 旧实现是 图片数 × 章节数 的嵌套 indexOf 全串扫描，几十张图 × 几十章就是数千次大字符串查找。
+  const refCounts = {};
+  const re = /data-asset-id="([^"]+)"/g;
+  state.project.chapters.forEach(ch => {
+    let m;
+    while ((m = re.exec(ch.html || ''))) refCounts[m[1]] = (refCounts[m[1]] || 0) + 1;
+  });
   assets.forEach(a => {
     const isCover = a.id === state.project.meta.coverAssetId;
     const cell = document.createElement('div');
     cell.className = 'asset-cell' + (isCover ? ' cover' : '');
-    const refCount = state.project.chapters.reduce((n, ch) => {
-      if (ch.html && ch.html.indexOf('data-asset-id="' + a.id + '"') >= 0) return n + 1;
-      return n;
-    }, 0);
+    const refCount = refCounts[a.id] || 0;
     cell.innerHTML =
       // 用缩略图显示（原图可能几百 KB，几十张会拖垮页面）
       '<img src="' + assetDisplayUrl(a) + '" alt="" loading="lazy" />' +
@@ -1617,24 +1633,36 @@ function saveEditorToState() {
   if (!ch) return;
   let html;
   if (state.sourceMode) {
-    html = $('#src-area').value;
+    // 源码模式：经由临时容器把 blob: src 一并改写为占位符
+    const d = document.createElement('div');
+    d.innerHTML = $('#src-area').value;
+    shrinkAssetSrcs(d);
+    html = d.innerHTML;
   } else {
     const ed = $('#editor');
-    // 只有存在临时 UI（图片删除按钮 / 选中态）时才需要克隆剥离。
-    // 无图片选中时直接读 innerHTML，省掉每次输入的整棵 DOM 深度克隆。
+    // 只有存在临时 UI（图片删除按钮 / 选中态）时才需要剥离。
+    // 就地摘除（代价仅与图片数成正比），序列化后立刻恢复选中控件。
     if (ed.querySelector('.t2e-fig-del, .t2e-sel')) {
-      html = stripEditorArtifacts(ed);
+      $$('.t2e-fig-del', ed).forEach(b => b.remove());
+      $$('.t2e-sel', ed).forEach(el => el.classList.remove('t2e-sel'));
+      // 顺带清理空 figure 残留（图片被删除后留下的空壳）
+      $$('figure', ed).forEach(f => {
+        if (!f.querySelector('img') && !f.textContent.trim()) f.remove();
+      });
+      html = serializeEditorHtml(ed);
       // 恢复当前选中的控件，避免自动保存后用户无法继续删除
       if (selectedFigure && ed.contains(selectedFigure)) ensureFigureControls(selectedFigure);
     } else {
-      html = ed.innerHTML;
+      html = serializeEditorHtml(ed);
     }
   }
-  // 内容未变则不清缓存，避免每次输入都重算全部章节字数
+  // 内容未变则不动缓存，避免每次输入都重算全部章节字数
   if (html !== ch.html) {
     ch.html = html;
-    invalidateWordCache(ch.id);
-   
+    // 字数直接读 textContent（原生实现，远快于对整段 HTML 字符串做正则去标签）
+    wordCache[ch.id] = state.sourceMode
+      ? countWords(html)
+      : $('#editor').textContent.replace(/\s/g, '').length;
   }
   ch.title = $('#chapter-title').value.trim();
 }
@@ -1654,7 +1682,7 @@ function selectChapter(id, keepScroll) {
     return;
   }
   $('#chapter-title').value = ch.title || '';
-  ed.innerHTML = ch.html || '';
+  setEditorHtml(ch.html);
   // EPUB 导入的章节：原书自带标题元素（如 h3.titlel2std 红底标签），
   // 编辑器顶部的标题输入框会和它重复显示，故隐藏。改标题可走章节列表重命名或源码模式。
   const wrap = $('.chapter-title-wrap');
@@ -1746,8 +1774,26 @@ $('#editor').addEventListener('input', debounce(() => {
   // 与正文内容无关，每次输入都重新生成并注入数万字节的 <style> 会触发整页重排，
   // 是编辑卡顿的主因（实测 textContent 赋值占 refreshDocStyle 的 88%）。
 }, 400));
-$('#editor').addEventListener('keyup', syncToolbar);
-$('#editor').addEventListener('mouseup', syncToolbar);
+/* queryCommandState 每次调用都可能触发样式重算，若每次按键都同步调用 8 次
+   （原 keyup/mouseup 直接绑定 syncToolbar），长文档下会持续抢占主线程。
+   统一改走 selectionchange（涵盖键盘 / 鼠标 / 触摸的一切选区变化），并按时间节流。 */
+let tbLastSync = 0, tbThrottleTimer = 0;
+function syncToolbarSoon() {
+  const now = Date.now();
+  const wait = 150 - (now - tbLastSync);
+  if (wait <= 0) { tbLastSync = now; syncToolbar(); return; }
+  if (!tbThrottleTimer) {
+    tbThrottleTimer = setTimeout(() => {
+      tbThrottleTimer = 0; tbLastSync = Date.now(); syncToolbar();
+    }, wait);
+  }
+}
+document.addEventListener('selectionchange', () => {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount && sel.anchorNode && $('#editor').contains(sel.anchorNode)) {
+    syncToolbarSoon();
+  }
+});
 $('#editor').addEventListener('focus', ensureParagraph);
 /* 图片：点击选中 / ✕ 删除 / Delete、Backspace 删除 */
 $('#editor').addEventListener('mousedown', (e) => {
@@ -1793,15 +1839,24 @@ $$('#toolbar .tb-btn[data-cmd]').forEach(btn => {
   };
 });
 $('#chapter-title').addEventListener('input', debounce(() => {
-  saveEditorToState(); renderChapterList(); saveSoon();
+  // 只改标题：不必 saveEditorToState()（那会序列化整章 innerHTML），
+  // 也不必 renderChapterList()（重建整棵章节列表），就地更新列表项文字即可
+  const ch = currentChapter();
+  if (ch) {
+    ch.title = $('#chapter-title').value.trim();
+    const nm = $('#chapter-list .ch-item.active .nm');
+    if (nm) nm.textContent = ch.title || '(无标题)';
+  }
+  saveSoon();
 }, 350));
 /* 源码模式 */
 $('#tb-source').onclick = () => {
   const on = !state.sourceMode;
   state.sourceMode = on;
   const ed = $('#editor'), ta = $('#src-area');
-  if (on) { ta.value = ed.innerHTML; ta.classList.add('show'); ed.style.display = 'none'; }
-  else { ed.innerHTML = ta.value; ed.style.display = ''; ta.classList.remove('show'); }
+  // 进入源码模式展示的是占位符形式（否则每张图都是几 MB base64，源码视图直接卡死）
+  if (on) { ta.value = serializeEditorHtml(ed); ta.classList.add('show'); ed.style.display = 'none'; }
+  else { ed.innerHTML = ta.value; hydrateEditorImages(ed); ed.style.display = ''; ta.classList.remove('show'); }
   $('#tb-source').classList.toggle('on', on);
   saveEditorToState();
 };
@@ -1825,6 +1880,73 @@ function mimeOf(dataUrl) {
 function extOf(mime) {
   const map = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
   return map[mime] || 'png';
+}
+/* ================= 正文图片的轻量化引用 =================
+ * 此前正文 <img src="data:...base64..."> 直接内嵌整张图：章节 HTML 动辄几十 MB，
+ * 于是每次输入停顿后的 innerHTML 序列化、草稿 JSON.stringify 都是长任务，
+ * 主线程被占住 → pointer/keydown 事件排队 → 表现为「输入延迟」数秒。
+ *
+ * 现改为：编辑器里用 blob: 对象 URL 显示（字符串仅 ~40 字符），
+ * 存入 state/草稿时改写成 'asset:<id>' 占位符 —— 导出本就按 data-asset-id 找图，
+ * 与 src 无关，因此导出 / 重分章 / 高亮等逻辑完全不受影响。 */
+const objUrlCache = {};
+function objectUrlForAsset(a) {
+  if (!a) return '';
+  if (objUrlCache[a.id]) return objUrlCache[a.id];
+  try {
+    const url = URL.createObjectURL(new Blob([dataUrlToU8(a.dataUrl)], { type: a.mime || 'image/png' }));
+    objUrlCache[a.id] = url;
+    return url;
+  } catch (e) { return a.dataUrl; }   // 极端情况下回退为 base64（功能不受影响）
+}
+/** 工程切换 / 清空时释放全部对象 URL */
+function revokeAssetUrls() {
+  for (const k in objUrlCache) { try { URL.revokeObjectURL(objUrlCache[k]); } catch (e) { /* 忽略 */ } }
+  for (const k in objUrlCache) delete objUrlCache[k];
+}
+/** 把 root 下带 data-asset-id 的 <img> 的 src 改写为 'asset:<id>' 占位符，返回恢复表 */
+function shrinkAssetSrcs(root) {
+  const swapped = [];
+  $$('img[data-asset-id]', root).forEach(img => {
+    const src = img.getAttribute('src') || '';
+    if (src.indexOf('asset:') === 0) return;
+    swapped.push([img, src]);
+    img.setAttribute('src', 'asset:' + img.getAttribute('data-asset-id'));
+  });
+  return swapped;
+}
+/** 序列化编辑器 HTML：图片 src 以轻量占位符存储，序列化后恢复 blob: 显示 */
+function serializeEditorHtml(ed) {
+  const swapped = shrinkAssetSrcs(ed);
+  const html = ed.innerHTML;
+  swapped.forEach(pair => pair[0].setAttribute('src', pair[1]));
+  return html;
+}
+/** 载入章节到编辑器后：占位符 / 旧 blob: src 换回可显示的对象 URL；顺带迁移旧草稿的 data: 图 */
+function hydrateEditorImages(root) {
+  $$('img', root).forEach(img => {
+    const aid = img.getAttribute('data-asset-id');
+    if (aid) {
+      const a = state.project.assets.find(x => x.id === aid);
+      if (a) img.setAttribute('src', objectUrlForAsset(a));
+      return;
+    }
+    // 旧草稿迁移：无 data-asset-id 的 data: 图，按内容匹配回图片库
+    const src = img.getAttribute('src') || '';
+    if (src.indexOf('data:') === 0) {
+      const a = state.project.assets.find(x => x.dataUrl === src);
+      if (a) {
+        img.setAttribute('data-asset-id', a.id);
+        img.setAttribute('src', objectUrlForAsset(a));
+      }
+    }
+  });
+}
+/** 设置编辑器内容并恢复图片显示（统一入口，避免各处遗漏 hydrate） */
+function setEditorHtml(html) {
+  const ed = $('#editor');
+  ed.innerHTML = html || '';
+  hydrateEditorImages(ed);
 }
 /**
  * 内容指纹：长度 + FNV-1a + djb2 两个独立哈希。
@@ -1899,18 +2021,6 @@ function selectFigure(fig) {
     ensureFigureControls(fig);
   }
 }
-/** 移除编辑器中的临时 UI、空 figure 残留，返回干净的 HTML 副本 */
-function stripEditorArtifacts(root) {
-  const clone = root.cloneNode(true);
-  Array.prototype.slice.call(clone.querySelectorAll('.t2e-fig-del')).forEach(b => b.remove());
-  Array.prototype.slice.call(clone.querySelectorAll('.t2e-sel')).forEach(el =>
-    el.classList.remove('t2e-sel'));
-  // 清理空的 figure 残留（图片被删除后留下的空壳）
-  Array.prototype.slice.call(clone.querySelectorAll('figure')).forEach(f => {
-    if (!f.querySelector('img') && !f.textContent.trim()) f.remove();
-  });
-  return clone.innerHTML;
-}
 /** 删除一张正文图片 */
 function deleteFigure(fig) {
   if (!fig || !fig.parentNode) return;
@@ -1934,7 +2044,7 @@ function deleteFigure(fig) {
 /** 在编辑器光标处插入图片；光标不在编辑区时追加到章节末尾 */
 function insertAssetAtCursor(asset) {
   if (!currentChapter()) { toast('请先新建或选择一个章节'); return; }
-  const fig = '<figure><img src="' + asset.dataUrl + '" data-asset-id="' + asset.id +
+  const fig = '<figure><img src="' + objectUrlForAsset(asset) + '" data-asset-id="' + asset.id +
     '" alt="' + esc(asset.name || '') + '" /></figure>';
   if (state.sourceMode) {
     const ta = $('#src-area');
@@ -1982,7 +2092,7 @@ function removeAsset(assetId, alsoFromText) {
   markAssetsDirty();
   clearFigureControls();
   const cur = currentChapter();
-  if (cur) $('#editor').innerHTML = cur.html || '';
+  if (cur) setEditorHtml(cur.html);
   renderAssets(); renderCoverPreview(); updateStatus(); saveSoon();
   toast(alsoFromText
     ? '已删除图片' + (removedFromText ? '，并移除正文中 ' + removedFromText + ' 处引用' : '')
@@ -1997,9 +2107,13 @@ function pruneUnusedAssets() {
     const re = /data-asset-id="([^"]+)"/g;
     let m;
     while ((m = re.exec(ch.html || ''))) used[m[1]] = true;
-    // 兼容没有 data-asset-id 的旧内容：按 dataUrl 匹配
-    p.assets.forEach(a => { if (ch.html && ch.html.indexOf(a.dataUrl) >= 0) used[a.id] = true; });
   });
+  // 兼容没有 data-asset-id 的旧内容：按 dataUrl 匹配（仅当确有内嵌 base64 时才做嵌套扫描）
+  if (p.chapters.some(ch => ch.html && ch.html.indexOf('src="data:') >= 0)) {
+    p.chapters.forEach(ch => {
+      p.assets.forEach(a => { if (ch.html && ch.html.indexOf(a.dataUrl) >= 0) used[a.id] = true; });
+    });
+  }
   const unused = p.assets.filter(a => !used[a.id]);
   if (!unused.length) { toast('没有未使用的图片'); return; }
   openModal('清理未使用的图片',
@@ -2153,7 +2267,7 @@ function markCurrent() {
   if (!currentChapter()) { toast('请先选择章节'); return; }
   currentChapter().html = tmp.innerHTML;
   invalidateWordCache(currentChapter().id);
-  $('#editor').innerHTML = tmp.innerHTML;
+  setEditorHtml(tmp.innerHTML);
   if (state.sourceMode) $('#src-area').value = tmp.innerHTML;
   saveEditorToState(); updateStatus(); saveSoon();
   toast(n ? '已标记 ' + n + ' 处' : '未发现可标记内容', n ? 'ok' : '');
@@ -2166,7 +2280,7 @@ function unmarkCurrent() {
   if (currentChapter()) {
     currentChapter().html = tmp.innerHTML;
     invalidateWordCache(currentChapter().id);
-    $('#editor').innerHTML = tmp.innerHTML;
+    setEditorHtml(tmp.innerHTML);
     if (state.sourceMode) $('#src-area').value = tmp.innerHTML;
   }
   updateStatus(); saveSoon();
@@ -2183,7 +2297,7 @@ function forEachChapter(fn) {
     invalidateWordCache(ch.id);     // 批量操作改写了内容，必须让字数缓存失效
   });
   if (currentChapter()) {
-    $('#editor').innerHTML = currentChapter().html;
+    setEditorHtml(currentChapter().html);
     if (state.sourceMode) $('#src-area').value = currentChapter().html;
   }
   updateStatus(); saveSoon();
@@ -2520,7 +2634,9 @@ function bindRangeOnce(id, valId, key, fmt) {
   $(id).addEventListener('input', () => {
     state.project.typography[key] = +$(id).value;
     $(valId).textContent = fmt(+$(id).value);
-    refreshDocStyle(); refreshPreview(); saveSoon();
+    // 拖动期间按帧节流刷新；refreshPreview 就是 refreshDocStyle，原写法每个 tick 生成两次样式表
+    refreshDocStyleSoon();
+    saveSoon();
   });
 }
 /** 渲染一组颜色 chips 并绑定点击 */
@@ -2580,20 +2696,20 @@ function initTypoPanel() {
   }, 400));
   const onSwitch = (el, key) => el.addEventListener('change', () => {
     state.project.typography[key] = el.checked;
-    refreshDocStyle(); refreshPreview(); saveSoon();
+    refreshDocStyle(); saveSoon();
   });
   onSwitch(ind, 'indent'); onSwitch(tc, 'titleCenter'); onSwitch(jf, 'justify');
   $$('#chips-font .chip').forEach(c => c.onclick = () => {
     $$('#chips-font .chip').forEach(x => x.classList.remove('on'));
     c.classList.add('on');
     state.project.typography.font = c.getAttribute('data-font');
-    refreshDocStyle(); refreshPreview(); saveSoon();
+    refreshDocStyle(); saveSoon();
   });
   $$('#chips-theme .chip').forEach(c => c.onclick = () => {
     $$('#chips-theme .chip').forEach(x => x.classList.remove('on'));
     c.classList.add('on');
     state.project.typography.theme = c.getAttribute('data-theme-doc');
-    refreshDocStyle(); refreshPreview(); saveSoon();
+    refreshDocStyle(); saveSoon();
   });
   $('#t-preset').addEventListener('change', () => {
     state.project.split.preset = $('#t-preset').value;
@@ -2627,7 +2743,7 @@ function initTypoPanel() {
       id: uid('ch'), title: c.title || '未命名章节', html: textToHtml(c.raw), enabled: true
     }));
     state.currentId = state.project.chapters.length ? state.project.chapters[0].id : null;
-    renderChapterList(); selectChapter(state.currentId); refreshPreview(); saveSoon();
+    selectChapter(state.currentId); saveSoon();
     toast('已重新分为 ' + state.project.chapters.length + ' 章', 'ok');
   };
 }
@@ -2640,7 +2756,6 @@ $$('.tab').forEach(tab => {
     $$('.tab-panel').forEach(p => {
       const on = p.getAttribute('data-panel') === name;
       p.classList.toggle('on', on);
-      // 必须显式重置每个面板的 display：
       // 必须显式重置每个面板的 display：
       // 若只对某一个分支赋值，之后残留的 inline `display:none` 会覆盖 .on 类，导致切回无反应。
       p.style.display = on ? 'block' : 'none';
@@ -3214,6 +3329,7 @@ function clearAll() {
 function doClearAll() {
   // 先作废待执行的自动保存，避免把旧内容写回草稿
   saveSoon.cancel();
+  revokeAssetUrls();
   state.project = emptyProject();
   state.currentId = null;
   state.sourceMode = false;
@@ -3267,6 +3383,7 @@ function normalizeProject(p) {
 }
 /** 把规范化后的项目装载进 state 并刷新界面 */
 function applyProjectData(p, toastMsg) {
+  revokeAssetUrls();          // 旧工程的对象 URL 全部失效
   state.project = normalizeProject(p);
   state.currentId = state.project.chapters.length ? state.project.chapters[0].id : null;
   state.sourceMode = false;
@@ -3709,7 +3826,7 @@ async function importEpubFile(file) {
         if (/^https?:|^data:/.test(src)) continue;
         const p = resolvePath(entry.path, src);
         if (imgCache[p]) {
-          img.setAttribute('src', imgCache[p].dataUrl);
+          img.setAttribute('src', 'asset:' + imgCache[p].id);   // 占位符，避免正文内嵌 base64
           img.setAttribute('data-asset-id', imgCache[p].id);
           continue;
         }
@@ -3737,7 +3854,7 @@ async function importEpubFile(file) {
         const asset = { id: uid('img'), name: p.split('/').pop(), mime: mime, dataUrl: dataUrl };
         imgBytes += Math.floor(dataUrl.length * 0.75);   // 按压缩后的实际占用累计
         newAssets.push(asset);
-        img.setAttribute('src', asset.dataUrl);
+        img.setAttribute('src', 'asset:' + asset.id);    // 占位符，载入编辑器时再换 blob: URL
         img.setAttribute('data-asset-id', asset.id);
         imgCache[p] = asset;
       }
@@ -3872,9 +3989,8 @@ function afterLoad() {
   initTypoPanel();
   const ch = currentChapter();
   $('#chapter-title').value = ch ? (ch.title || '') : '';
-  $('#editor').innerHTML = ch ? (ch.html || '') : '';
+  setEditorHtml(ch ? ch.html : '');
   updateStatus();
-  refreshPreview();
 }
 $('#btn-import').onclick = () => $('#file-input').click();
 $('#btn-import-epub').onclick = () => $('#epub-input').click();
