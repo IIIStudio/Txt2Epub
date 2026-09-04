@@ -147,6 +147,16 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
   border-radius:4px;cursor:pointer;font-size:11px;line-height:1;padding:0
 }
 .ch-item .ops button:hover{background:var(--border); color:var(--text)}
+/* 两级目录：卷加粗、章缩进，便于区分层级 */
+.ch-item.ch-volume .nm{font-weight:700; color:var(--text)}
+.ch-item.ch-child{padding-left:20px}
+.ch-item.ch-child .nm{color:var(--muted)}
+.ch-item.ch-child .idx{font-size:10px}
+/* 可滚动区域：用 flex:1 + min-height:0 而非固定 max-height，
+   这样图片多时可以滚动查看，而不是被裁掉。 */
+.asset-scroll{flex:1 1 auto; min-height:90px; max-height:34vh; overflow:auto}
+.asset-count{font-size:11px; font-weight:600; color:var(--faint);
+  background:var(--surface-2); border-radius:999px; padding:1px 7px}
 .asset-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:10px 12px}
 .asset-cell{position:relative; aspect-ratio:1; border:1px solid var(--border); border-radius:var(--r-sm); overflow:hidden; background:var(--surface-2); cursor:pointer}
 .asset-cell img{width:100%;height:100%;object-fit:cover;display:block}
@@ -348,11 +358,13 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
       </div>
       <div class="pane-head" style="border-top:1px solid var(--border)">
         <span>图片库</span>
+        <span class="asset-count" id="asset-count">0</span>
         <div class="spacer"></div>
         <button class="btn ghost sm" id="btn-prune-images" title="删除未被任何章节引用的图片">清理</button>
         <button class="btn ghost sm" id="btn-add-image">上传</button>
       </div>
-      <div style="max-height:180px; overflow:auto">
+      <!-- 可滚动：导入精排书时常有几十张图，固定高度会看不到后面的 -->
+      <div class="asset-scroll">
         <div class="asset-grid" id="asset-grid"></div>
         <div class="empty" id="asset-empty" style="padding:12px">暂无图片</div>
       </div>
@@ -1177,6 +1189,215 @@ function userCssText(prefix) {
   // prefix === 'body' 表示作用于整个文档（导出），无需作用域；其余（预览）必须限定，避免污染 UI
   return scopeCss(state.project.customCss || '', prefix === 'body' ? null : prefix);
 }
+/* 导入 EPUB 时，CSS 引用资源的体积上限（单个）。
+   设置原因：精排书的整页背景图常达数 MB，若全部转 base64 存入内存会撑爆页面
+   （实测一个 29MB 的 epub，其 CSS 引用了 6 张共约 24MB 的背景图，导致 OOM）。
+   超限的资源不导入，CSS 中对应 url() 保持原样 —— 阅读器会忽略失效的引用，不影响其余样式。 */
+const CSS_RES_MAX_BYTES = 12 * 1024 * 1024;  // 12 MB（导入时会自动压缩，实际占用远小于此）
+/* 导入 EPUB 时正文图片的体积上限。
+   所有图片都以 base64 常驻内存并存入 IndexedDB 草稿，一本几十 MB、上百章的精排书
+   会把页面撑爆（实测 29MB 的 epub，87 章图片全部转 base64 导致 OOM）。 */
+const IMG_MAX_BYTES = 12 * 1024 * 1024;           // 单张 12 MB
+const IMG_TOTAL_MAX_BYTES = 128 * 1024 * 1024;    // 合计 128 MB（压缩后实际占用大幅降低）
+
+/* 导入时的图片压缩配置。
+   精排书的整页背景图动辄数 MB，全部原样转 base64 常驻内存会撑爆页面。
+   导入阶段统一压缩：先按最大边长等比缩放，再按目标体积做质量降级。 */
+const IMG_COMPRESS = {
+  enabled: true,
+  maxEdge: 1600,        // 最大边长（px），等比缩放
+  maxBytes: 400 * 1024, // 压缩后目标体积上限
+  minQuality: 0.5       // 质量降级下限，低于此值不再继续（避免糊成马赛克）
+};
+/* 图片库缩略图：格子里若直接放完整原图的 base64，
+   几十张图就是几十 MB 的 DOM 字符串，浏览器要解码全部大图才能画出缩略图，必然卡死。
+   故为每张图额外生成一张小图专供列表显示。 */
+const THUMB_EDGE = 160;
+async function makeThumb(dataUrl) {
+  if (/svg/i.test(mimeFromDataUrl(dataUrl))) return dataUrl;   // 矢量图无需缩略
+  const info = await probeImage(dataUrl);
+  if (!info || !info.img || !info.width || !info.height) return '';
+  try {
+    const scale = Math.min(1, THUMB_EDGE / Math.max(info.width, info.height));
+    const w = Math.max(1, Math.round(info.width * scale));
+    const h = Math.max(1, Math.round(info.height * scale));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    if (!g) return '';
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(info.img, 0, 0, w, h);
+    return c.toDataURL('image/jpeg', 0.72);
+  } catch (e) { return ''; }
+}
+/** 为所有缺缩略图的图片批量生成（后台、串行，避免同时解码大量大图） */
+async function generateThumbs() {
+  for (const a of state.project.assets) {
+    if (a.thumb || a.__thumbPending) continue;
+    a.__thumbPending = true;
+    try {
+      const t = await makeThumb(a.dataUrl);
+      if (t) a.thumb = t;
+    } catch (e) { /* 忽略单张失败 */ }
+    a.__thumbPending = false;
+  }
+  renderAssets();
+  saveSoon();
+}
+/** 取得用于显示的图：优先缩略图，缺失时惰性生成 */
+function assetDisplayUrl(a) {
+  if (!a) return '';
+  if (a.thumb) return a.thumb;
+  if (a.__thumbPending) return a.dataUrl;      // 生成中先用原图顶上
+  a.__thumbPending = true;
+  makeThumb(a.dataUrl).then(t => {
+    a.__thumbPending = false;
+    if (t) { a.thumb = t; renderAssets(); saveSoon(); }
+  }).catch(() => { a.__thumbPending = false; });
+  return a.dataUrl;
+}
+/** 返回图片尺寸 */
+function probeImage(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({
+      img: img,
+      width: img.naturalWidth || img.width,
+      height: img.naturalHeight || img.height
+    });
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+/**
+ * 压缩图片：等比缩放到 maxEdge 内，再按需降低质量直到体积达标。
+ * SVG 不压缩（矢量图缩放无损意义，且 canvas 会将其栅格化反而变差）。
+ * 失败时原样返回，保证导入流程不中断。
+ */
+async function compressImageDataUrl(dataUrl, mime) {
+  if (!IMG_COMPRESS.enabled) return { dataUrl: dataUrl, changed: false };
+  if (/svg/i.test(mime || '')) return { dataUrl: dataUrl, changed: false };
+  const info = await probeImage(dataUrl);
+  if (!info || !info.width || !info.height) return { dataUrl: dataUrl, changed: false };
+  const outMime = /gif/i.test(mime || '') ? 'image/png' : (/png|jpeg|webp/i.test(mime || '') ? mime : 'image/jpeg');
+  const scale = Math.min(1, IMG_COMPRESS.maxEdge / Math.max(info.width, info.height));
+  const w = Math.max(1, Math.round(info.width * scale));
+  const h = Math.max(1, Math.round(info.height * scale));
+  try {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    if (!g) return { dataUrl: dataUrl, changed: false };   // 环境不支持 canvas（如部分无头浏览器）
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(info.img, 0, 0, w, h);
+    let q = 0.92;
+    let out = c.toDataURL(outMime, q);
+    const approxBytes = (s) => Math.floor(s.length * 0.75);
+    while (approxBytes(out) > IMG_COMPRESS.maxBytes && q > IMG_COMPRESS.minQuality) {
+      q = Math.max(IMG_COMPRESS.minQuality, q - 0.1);
+      out = c.toDataURL(outMime, q);
+    }
+    return { dataUrl: out, changed: out !== dataUrl };
+  } catch (e) {
+    return { dataUrl: dataUrl, changed: false };
+  }
+}
+/** 附加 CSS 中 url() 引用的资源路径（已归一为 ../assets/<文件名>） */
+function cssResourceRefs() {
+  const out = [];
+  const re = /url\(\s*['"]?([^)'"]+)['"]?\s*\)/g;
+  let m;
+  while ((m = re.exec(state.project.customCss || ''))) {
+    const href = m[1].trim();
+    if (/^(data|https?):/i.test(href)) continue;
+    out.push(href);
+  }
+  return out;
+}
+/**
+ * 重写 CSS 里的 url()：把相对「原 CSS 文件」的路径，改为相对包内 OEBPS/style/main.css 的
+ * `../assets/<文件名>`，并返回其中引用到的资源（二进制以 dataUrl 携带）。
+ *
+ * 为何必须重写：原书 CSS 位于 OEBPS/Styles/，其 `../Images/x.png` 解析为 OEBPS/Images/x.png；
+ * 而我们的 main.css 位于 OEBPS/style/，同样写法会解析成 OEBPS/Images/x.png —— 看似相同，
+ * 但若原 CSS 位于其他目录（如 OEBPS/css/ 且写 url(images/x.png)），路径就会错。
+ * 统一归一化到 ../assets/ 后，无论原书目录结构如何都不会错。
+ *
+ * @param {string} css 原 CSS 文本
+ * @param {string} cssDir 原 CSS 所在目录（包内绝对路径，如 OEBPS/Styles）
+ * @param {function} lookup 同步查询：绝对包内路径 → dataUrl，找不到返回 null
+ *                   （zip 读取是异步的，故资源需由调用方预先读好再传入）
+ * @returns {{css:string, resources:Array, missing:number}}
+ */
+function rewriteCssUrls(css, cssDir, lookup) {
+  const resources = [];
+  let missing = 0;
+  const out = String(css || '').replace(
+    /url\(\s*(['"]?)([^)'"]+)\1\s*\)/g,
+    function (full, quote, href) {
+      href = href.trim();
+      if (/^(data|https?):/i.test(href)) return full;
+      const abs = resolveDir(cssDir, href);
+      const name = abs.split('/').pop();
+      if (!name) return full;
+      const dataUrl = lookup(abs);
+      if (!dataUrl) { missing++; return full; }    // 缺失则保持原样，不破坏规则
+      if (!resources.some(r => r.name === name)) {
+        resources.push({ id: uid('res'), name: name, dataUrl: dataUrl });
+      }
+      return 'url(' + (quote || '') + '../assets/' + name + (quote || '') + ')';
+    }
+  );
+  return { css: out, resources: resources, missing: missing };
+}
+/** 扫描 CSS 中 url() 引用的包内绝对路径（用于预先异步读取） */
+function collectCssUrlPaths(css, cssDir) {
+  const out = [];
+  const re = /url\(\s*(['"]?)([^)'"]+)\1\s*\)/g;
+  let m;
+  while ((m = re.exec(String(css || '')))) {
+    const href = m[2].trim();
+    if (/^(data|https?):/i.test(href)) continue;
+    const abs = resolveDir(cssDir, href);
+    if (abs) out.push(abs);
+  }
+  return out;
+}
+/** 相对「目录」解析路径（注意：base 是目录而非文件） */
+function resolveDir(baseDir, rel) {
+  const stack = String(baseDir || '').split('/').concat(String(rel).split('/'));
+  const out = [];
+  stack.forEach(seg => {
+    if (seg === '' || seg === '.') return;
+    if (seg === '..') out.pop(); else out.push(seg);
+  });
+  return out.join('/');
+}
+const NAME_MIMES = {
+  ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml'
+};
+function mimeFromName(name) {
+  const ext = String(name).split('.').pop().toLowerCase();
+  return NAME_MIMES[ext] || 'application/octet-stream';
+}
+/** 从 dataUrl 取 mime */
+function mimeFromDataUrl(dataUrl) {
+  const m = /^data:([^;,]+)/.exec(String(dataUrl || ''));
+  return m ? m[1] : 'image/png';
+}
+/** Uint8Array → base64（分片处理，避免 apply 参数过多导致栈溢出） */
+function u8ToBase64(u8) {
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < u8.length; i += chunk) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
 
 /* ------------------------- 5. 状态 ------------------------- */
 /* 默认排版（中文电子书常规做法 + 国际风的克制配色）：
@@ -1224,6 +1445,8 @@ function emptyProject() {
     encoding: '', fileName: '',
     rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
     customCss: '',
+    // 附加 CSS 引用的资源（字体 / 背景图），按文件名匹配，导出时写入 OEBPS/assets/
+    resources: [],
     chapters: [],
     assets: []
   };
@@ -1294,7 +1517,9 @@ function renderChapterList() {
   $('#chapter-empty').style.display = chapters.length ? 'none' : 'block';
   chapters.forEach((c, i) => {
     const el = document.createElement('div');
-    el.className = 'ch-item' + (c.id === state.currentId ? ' active' : '');
+    const lv = Math.max(1, Math.min(2, c.level || 0));
+    el.className = 'ch-item' + (c.id === state.currentId ? ' active' : '') +
+      (lv === 1 ? ' ch-volume' : ' ch-child');
     el.innerHTML =
       '<span class="idx">' + String(i + 1).padStart(2, '0') + '</span>' +
       '<span class="nm">' + esc(c.title || '(无标题)') + '</span>' +
@@ -1319,6 +1544,8 @@ function renderAssets() {
   grid.innerHTML = '';
   const assets = state.project.assets;
   $('#asset-empty').style.display = assets.length ? 'none' : 'block';
+  const cnt = $('#asset-count');
+  if (cnt) cnt.textContent = assets.length;
   assets.forEach(a => {
     const isCover = a.id === state.project.meta.coverAssetId;
     const cell = document.createElement('div');
@@ -1328,7 +1555,8 @@ function renderAssets() {
       return n;
     }, 0);
     cell.innerHTML =
-      '<img src="' + a.dataUrl + '" alt="" />' +
+      // 用缩略图显示（原图可能几百 KB，几十张会拖垮页面）
+      '<img src="' + assetDisplayUrl(a) + '" alt="" loading="lazy" />' +
       (isCover ? '<div class="tag">封面</div>' : '') +
       '<button class="act act-cover" data-act="cover" title="设为封面">★</button>' +
       '<button class="act act-del" data-act="del" title="删除图片">✕</button>';
@@ -1394,14 +1622,25 @@ function selectChapter(id, keepScroll) {
   saveEditorToState();
   state.currentId = id;
   const ch = currentChapter();
+  const page = $('#editor-page');
+  const ed = $('#editor');
   if (!ch) {
-    $('#editor').innerHTML = '';
+    ed.innerHTML = '';
     $('#chapter-title').value = '';
+    if (page) page.style.display = '';
     renderChapterList();
     return;
   }
   $('#chapter-title').value = ch.title || '';
-  $('#editor').innerHTML = ch.html || '';
+  ed.innerHTML = ch.html || '';
+  // EPUB 导入的章节：原书自带标题元素（如 h3.titlel2std 红底标签），
+  // 编辑器顶部的标题输入框会和它重复显示，故隐藏。改标题可走章节列表重命名或源码模式。
+  const wrap = $('.chapter-title-wrap');
+  if (wrap) wrap.style.display = ch.fromEpub ? 'none' : '';
+  // 还原原书的 body class（如 body.juan1 的整页背景图）。
+  // scopeCss 把 body.juan1 重写为 .editor-surface.juan1，因此 class 必须挂在 editor-surface 上。
+  ed.className = 'editor-surface t2e-doc' +
+    (ch.bodyClass && /^[A-Za-z0-9_\- ]+$/.test(ch.bodyClass) ? ' ' + ch.bodyClass.trim() : '');
   if (state.sourceMode) $('#src-area').value = ch.html || '';
   renderChapterList();
   if (!keepScroll) $('#editor-wrap').scrollTop = 0;
@@ -1761,6 +2000,7 @@ async function addImageFiles(files) {
     insertAssetAtCursor(res.asset);
   }
   renderAssets(); saveSoon();
+  generateThumbs();
   if (added && reused) toast('新增 ' + added + ' 张，复用已有图片 ' + reused + ' 张（未重复保存）', 'ok');
   else if (added) toast('已插入 ' + added + ' 张图片', 'ok');
   else if (reused) toast('已插入 ' + reused + ' 张（内容已存在，直接引用已有图片）', 'ok');
@@ -2566,6 +2806,37 @@ function prepareChapterHtml(html, imgMap) {
   });
   return toXhtmlFragment(root.innerHTML);
 }
+/**
+ * 生成两级嵌套的 <ol> 列表项（不含外层 <ol>）。
+ * 算法：level 1 开启一个「可容纳子项的 li」，紧随其后的 level 2 归入其中；
+ *       遇到下一个 level 1 或列表结束时闭合。
+ */
+function buildNestedNav(chapters, hrefOf) {
+  // 第一遍：分组为 [{item, children[]}]，并夹到最多两级
+  const groups = [];
+  chapters.forEach((ch, i) => {
+    const lv = Math.max(1, Math.min(2, ch.level || 0));
+    const node = { ch: ch, index: i, children: [] };
+    if (lv === 1 || !groups.length) groups.push(node);
+    else groups[groups.length - 1].children.push(node);
+  });
+  // 第二遍：输出。有子项则嵌套 <ol>，否则平铺 <li>
+  const out = [];
+  groups.forEach(g => {
+    const a = '<a href="' + hrefOf(g.index) + '">' +
+      esc(g.ch.title || ('第 ' + (g.index + 1) + ' 章')) + '</a>';
+    if (!g.children.length) {
+      out.push('<li>' + a + '</li>');
+      return;
+    }
+    const kids = g.children.map(k =>
+      '<li><a href="' + hrefOf(k.index) + '">' +
+      esc(k.ch.title || ('第 ' + (k.index + 1) + ' 章')) + '</a></li>'
+    );
+    out.push('<li>' + a + '\n<ol>\n' + kids.join('\n') + '\n</ol>\n</li>');
+  });
+  return out.join('\n');
+}
 function buildEpubFiles() {
   const p = state.project;
   const enc = new TextEncoder();
@@ -2602,12 +2873,21 @@ function buildEpubFiles() {
     const file = 'OEBPS/text/chapter-' + String(i + 1).padStart(3, '0') + '.xhtml';
     const body = prepareChapterHtml(ch.html || '', imgMap);
     const title = esc(ch.title || ('第 ' + (i + 1) + ' 章'));
+    // 还原原书的 body class（如 body.juan1 承载分卷页的整页背景图）
+    const bodyClass = (ch.bodyClass && /^[A-Za-z0-9_\- ]+$/.test(ch.bodyClass))
+      ? ' class="' + ch.bodyClass.trim() + '"' : '';
+    // 来自 EPUB 导入的章节：原书自带标题与配套样式（如 <h3 class="titlel2std"><span class="num">第一章</span>），
+    // 一律不再生成 chapter-title，否则页面出现两份标题。
+    // hasOwnHeading 兜底：TXT 导入或手输章节仍正常生成。
+    const skipTitle = ch.fromEpub || /<h[1-6][\s>]/i.test(body);
+    const heading = (ch.title && !skipTitle)
+      ? '<h1 class="chapter-title">' + title + '</h1>\n' : '';
     add(file,
       '<?xml version="1.0" encoding="UTF-8"?>\n' +
       '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="' + lang + '" lang="' + lang + '">\n' +
       '<head>\n<meta charset="UTF-8" />\n<title>' + title + '</title>\n' +
       '<link rel="stylesheet" type="text/css" href="../style/main.css" />\n</head>\n' +
-      '<body>\n' + (ch.title ? '<h1 class="chapter-title">' + title + '</h1>\n' : '') + body + '\n</body>\n</html>');
+      '<body' + bodyClass + '>\n' + heading + body + '\n</body>\n</html>');
     spineIds.push(id);
     manifestItems.push('<item id="' + id + '" href="text/chapter-' + String(i + 1).padStart(3, '0') + '.xhtml" media-type="application/xhtml+xml" />');
   });
@@ -2620,11 +2900,23 @@ function buildEpubFiles() {
     'h1.chapter-title:first-child{page-break-before:auto;}\n' +
     (userCssText('body') ? '\n' + userCssText('body') + '\n' : ''));
 
-  // nav.xhtml
-  const navItems = chapters.map((ch, i) => {
-    const href = 'text/chapter-' + String(i + 1).padStart(3, '0') + '.xhtml';
-    return '<li><a href="' + href + '">' + esc(ch.title || ('第 ' + (i + 1) + ' 章')) + '</a></li>';
-  }).join('\n');
+  // 附加 CSS 引用的资源（字体 / 背景图）。
+  // 导入 EPUB 时 url() 已被重写为 ../assets/<文件名>，此处按文件名写入 OEBPS/assets/。
+  cssResourceRefs().forEach(href => {
+    const name = href.split('/').pop();
+    if (!name) return;
+    const res = p.resources.find(r => r.name === name);
+    if (res) files.push({ name: 'OEBPS/assets/' + name, data: dataUrlToU8(res.dataUrl) });
+  });
+
+  // nav.xhtml —— 支持两级（卷 → 章），按 chapter.level 嵌套 <ol>
+  const chapterHref = (i) => 'text/chapter-' + String(i + 1).padStart(3, '0') + '.xhtml';
+  /**
+   * 生成嵌套 <ol>。层级约定：1=卷（父），2=章（子）；level 为 0/缺失时按 1 处理。
+   * 若某卷下没有任何章（孤立的 level 1），则退化为平铺 <li>，不产生空 <ol>。
+   */
+  const navItems = buildNestedNav(chapters, chapterHref);
+  const navDepth = chapters.some(c => (c.level || 0) >= 2) ? 2 : 1;
   add('OEBPS/nav.xhtml',
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="' + lang + '" lang="' + lang + '">\n' +
@@ -2634,18 +2926,35 @@ function buildEpubFiles() {
     (chapters.length ? 'text/chapter-001.xhtml' : '') + '">正文</a></li></ol></nav>\n' +
     '</body>\n</html>');
 
-  // toc.ncx
-  const ncxPoints = chapters.map((ch, i) => {
-    const href = 'text/chapter-' + String(i + 1).padStart(3, '0') + '.xhtml';
-    return '<navPoint id="np-' + (i + 1) + '" playOrder="' + (i + 1) + '">\n' +
-      '<navLabel><text>' + esc(ch.title || ('第 ' + (i + 1) + ' 章')) + '</text></navLabel>\n' +
-      '<content src="' + href + '" />\n</navPoint>';
-  }).join('\n');
+  // toc.ncx —— 同样支持两级嵌套 <navPoint>
+  const ncxPoints = (function () {
+    // 与 nav 保持完全一致的分组方式，避免两边目录结构不一致
+    const groups = [];
+    chapters.forEach((ch, i) => {
+      const lv = Math.max(1, Math.min(2, ch.level || 0));
+      const node = { ch: ch, index: i, children: [] };
+      if (lv === 1 || !groups.length) groups.push(node);
+      else groups[groups.length - 1].children.push(node);
+    });
+    const point = (n, order) =>
+      '<navPoint id="np-' + order + '" playOrder="' + order + '">\n' +
+      '<navLabel><text>' + esc(n.ch.title || ('第 ' + (n.index + 1) + ' 章')) + '</text></navLabel>\n' +
+      '<content src="' + chapterHref(n.index) + '" />';
+    const out = [];
+    let order = 0;
+    groups.forEach(g => {
+      order++;
+      if (!g.children.length) { out.push(point(g, order) + '\n</navPoint>'); return; }
+      const kids = g.children.map(k => { order++; return point(k, order) + '\n</navPoint>'; });
+      out.push(point(g, order - g.children.length) + '\n' + kids.join('\n') + '\n</navPoint>');
+    });
+    return out.join('\n');
+  })();
   add('OEBPS/toc.ncx',
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="' + lang + '">\n' +
     '<head>\n<meta name="dtb:uid" content="urn:uuid:' + uuid() + '" />\n' +
-    '<meta name="dtb:depth" content="1" />\n<meta name="dtb:totalPageCount" content="0" />\n' +
+    '<meta name="dtb:depth" content="' + navDepth + '" />\n<meta name="dtb:totalPageCount" content="0" />\n' +
     '<meta name="dtb:maxPageNumber" content="0" />\n</head>\n' +
     '<docTitle><text>' + esc(p.meta.title || '未命名') + '</text></docTitle>\n' +
     '<navMap>\n' + ncxPoints + '\n</navMap>\n</ncx>');
@@ -2875,6 +3184,9 @@ function normalizeProject(p) {
         id: c && c.id ? c.id : uid('ch'),
         title: (c && c.title) || '',
         html: (c && c.html) || '',
+        level: c && c.level ? c.level : 0,      // 0=未分级, 1=卷, 2=章
+        bodyClass: (c && c.bodyClass) || '',     // 原书 <body class>，导出时还原
+        fromEpub: !!(c && c.fromEpub),           // EPUB 导入的章节不生成 chapter-title
         enabled: c && c.enabled !== false
       }))
     : [];
@@ -3128,7 +3440,12 @@ async function readZip(buf) {
     }
     throw new Error('不支持的压缩方式：' + e.method);
   }
-  return { names: Object.keys(entries), read: read };
+  /** 压缩后大小（用于导入前判断是否超限，避免把超大文件读进内存）；不存在返回 -1 */
+  function sizeOf(name) {
+    const e = entries[name];
+    return e ? e.compSize : -1;
+  }
+  return { names: Object.keys(entries), read: read, sizeOf: sizeOf };
 }
 function resolvePath(base, rel) {
   const stack = base.split('/').slice(0, -1).concat(rel.split('/'));
@@ -3138,6 +3455,33 @@ function resolvePath(base, rel) {
     if (seg === '..') out.pop(); else out.push(seg);
   });
   return out.join('/');
+}
+/**
+ * 从 zip 读取一张图片并登记为 asset（含压缩与缩略图）。
+ * @returns asset 或 null
+ */
+async function readZipImageAsAsset(zip, path, nameHint) {
+  const sz = zip.sizeOf ? zip.sizeOf(path) : -1;
+  if (sz > IMG_MAX_BYTES) return null;
+  const bin = await zip.read(path);
+  if (!bin) return null;
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bin.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bin.subarray(i, i + chunk));
+  }
+  let mime = mimeFromName(path);
+  if (!/^image\//i.test(mime)) mime = 'image/png';
+  let dataUrl = 'data:' + mime + ';base64,' + btoa(binary);
+  const c = await compressImageDataUrl(dataUrl, mime);
+  if (c.changed) { dataUrl = c.dataUrl; mime = mimeFromDataUrl(dataUrl); }
+  const asset = {
+    id: uid('img'),
+    name: (nameHint || path.split('/').pop() || 'image'),
+    mime: mime, dataUrl: dataUrl, thumb: ''
+  };
+  state.project.assets.push(asset);
+  return asset;
 }
 async function importEpubFile(file) {
   try {
@@ -3172,48 +3516,264 @@ async function importEpubFile(file) {
       if (items[it[1]] && /xhtml|html/.test(items[it[1]].mediaType)) spine.push(items[it[1]]);
     }
     if (!spine.length) throw new Error('未找到正文内容');
+
+    /* —— 读取原书目录层级（卷 → 章）——
+       此前每个 spine 条目都用「正文首个 h1/h2」当标题并平铺成一级，
+       原书 nav/toc 中的卷 → 章两级结构全部丢失。 */
+    const navLevels = {};    // 包内正文路径 -> 层级（1=卷, 2=章）
+    const navTitles = {};    // 包内正文路径 -> 目录中的标题
+    const navItem = Object.keys(items).map(k => items[k])
+      .find(it2 => /nav/i.test(it2.mediaType || '') || /nav\.xhtml$/i.test(it2.href || '')) ||
+      Object.keys(items).map(k => items[k]).find(it2 => /ncx/i.test(it2.mediaType || ''));
+    if (navItem) {
+      const navBin = await zip.read(navItem.path);
+      if (navBin) {
+        const navText = dec.decode(navBin);
+        // EPUB3 nav.xhtml：按嵌套 <ol> 判断层级
+        if (/nav\.xhtml$/i.test(navItem.path) || /<nav[\s>]/i.test(navText)) {
+          const doc2 = new DOMParser().parseFromString(navText, 'text/html');
+          const walk = (list, level) => {
+            Array.prototype.forEach.call(list.children || [], li => {
+              const a = li.querySelector(':scope > a, :scope > span');
+              const sub = li.querySelector(':scope > ol');
+              const href = a ? (a.getAttribute('href') || '') : '';
+              const label = a ? (a.textContent || '').trim() : '';
+              if (href) {
+                const abs = resolveDir(navItem.path.split('/').slice(0, -1).join('/'), href);
+                const key = abs.split('#')[0];
+                if (!(key in navLevels)) {
+                  navLevels[key] = level;
+                  if (label) navTitles[key] = label;
+                }
+              }
+              if (sub) walk(sub, level + 1);
+            });
+          };
+          const ol = doc2.querySelector('nav[epub\\:type="toc"] > ol, nav > ol, ol');
+          if (ol) walk(ol, 1);
+        } else {
+          // EPUB2 toc.ncx：按嵌套 <navPoint> 判断层级。
+          // 语义：**walkNcx(np, level) = 处理 np 这一个 navPoint，再递归它的子 navPoint**。
+          // 曾写成 walkNcx(容器, level)「遍历 children 找 navPoint」，
+          // 于是递归时把子 navPoint 当容器传入，而子 navPoint 的 children 只有
+          // navLabel/content（没有 navPoint）→ 二层级全部解析不出来（实测 L2=0）。
+          const doc2 = new DOMParser().parseFromString(navText, 'application/xml');
+          const ln = (n) => (n.tagName || '').toLowerCase().replace(/^.*:/, '');
+          const navDir = navItem.path.split('/').slice(0, -1).join('/');
+          const walkNcx = (np, level) => {
+            let href = '', label = '';
+            Array.prototype.forEach.call(np.children || [], ch => {
+              const n = ln(ch);
+              if (n === 'content') href = ch.getAttribute('src') || '';
+              if (n === 'navlabel') label = (ch.textContent || '').trim();
+            });
+            if (href) {
+              const abs = resolveDir(navDir, href);
+              const key = abs.split('#')[0];
+              if (!(key in navLevels)) {
+                navLevels[key] = level;
+                if (label) navTitles[key] = label;
+              }
+            }
+            Array.prototype.filter.call(np.children || [], ch => ln(ch) === 'navpoint')
+              .forEach(sub => walkNcx(sub, level + 1));
+          };
+          const map = doc2.querySelector('navMap') ||
+            doc2.getElementsByTagName('navMap')[0] || doc2.documentElement;
+          if (map) {
+            Array.prototype.filter.call(map.children || [], ch => ln(ch) === 'navpoint')
+              .forEach(np => walkNcx(np, 1));
+          }
+        }
+      }
+    }
+
+    /* —— 保留原书 CSS ——
+       此前只取 body.innerHTML，原书样式表被整个丢弃：div.wedge / div.container 等 class
+       在新样式表里不存在，反而被裸元素规则（p/table/img）反向覆盖，精排版全毁。
+       现改为把「manifest 中的样式表 + 章节内联 <style>」合并进「附加自定义 CSS」，
+       并把其中 url() 引用的字体 / 背景图一并导入为资源。 */
+    const cssParts = [];
+    for (const key of Object.keys(items)) {
+      const it2 = items[key];
+      if (!/text\/css/i.test(it2.mediaType || '')) continue;
+      const bin = await zip.read(it2.path);
+      if (bin) cssParts.push({ text: dec.decode(bin), dir: it2.path.split('/').slice(0, -1).join('/') });
+    }
+    const inlineStyles = [];
     const imgCache = {};
+    let imgBytes = 0;        // 已导入图片字节数（按压缩后的实际占用累计）
+    let skippedImgs = 0;     // 超体积限制而移除的图片数
+    let compressedImgs = 0;  // 被压缩的图片数
+    const newAssets = [];    // 收集到局部数组，最后统一赋值。
+                             // 此前直接 push 到 state.project.assets，而循环之后才执行
+                             // state.project = emptyProject()，把推入的图片全部清空——
+                             // 导致图片库只剩封面、正文图片"丢失"。
     const chapters = [];
     for (const entry of spine) {
       const raw = await zip.read(entry.path);
       if (!raw) continue;
       const html = dec.decode(raw);
       const doc = new DOMParser().parseFromString(html, 'text/html');
-      Array.prototype.forEach.call(doc.querySelectorAll('img'), img => {
-        const src = img.getAttribute('src') || '';
-        if (/^https?:|^data:/.test(src)) return;
-        const p = resolvePath(entry.path, src);
-        const asset = { id: uid('img'), name: p.split('/').pop(), mime: 'image/png', dataUrl: '' };
-        if (imgCache[p]) { img.setAttribute('src', imgCache[p].dataUrl); img.setAttribute('data-asset-id', imgCache[p].id); return; }
-        const bin = zip.read(p);
-        bin.then(b => {
-          if (!b) return;
-          let binary = '';
-          const chunk = 0x8000;
-          for (let i = 0; i < b.length; i += chunk) binary += String.fromCharCode.apply(null, b.subarray(i, i + chunk));
-          asset.mime = /\.jpe?g$/i.test(p) ? 'image/jpeg' : (/\.gif$/i.test(p) ? 'image/gif' : (/\.webp$/i.test(p) ? 'image/webp' : 'image/png'));
-          asset.dataUrl = 'data:' + asset.mime + ';base64,' + btoa(binary);
-          state.project.assets.push(asset);
-          img.setAttribute('src', asset.dataUrl);
-          img.setAttribute('data-asset-id', asset.id);
-          imgCache[p] = asset;
-          renderAssets();
-        });
+      // 章节内联 <style>：提取并入附加 CSS（否则导出时会被 cleanForEpub 删掉）
+      Array.prototype.forEach.call(doc.querySelectorAll('style'), st => {
+        if (st.textContent) {
+          inlineStyles.push({ text: st.textContent, dir: entry.path.split('/').slice(0, -1).join('/') });
+        }
+        st.remove();
       });
+      // 必须逐张 await 处理完再取 innerHTML：
+      // 原实现用 bin.then() 异步替换 img.src，而 body.innerHTML 是同步快照的，
+      // 导致替换尚未发生就已固化，导入的图片全部失效。
+      for (const img of Array.prototype.slice.call(doc.querySelectorAll('img'))) {
+        const src = img.getAttribute('src') || '';
+        if (/^https?:|^data:/.test(src)) continue;
+        const p = resolvePath(entry.path, src);
+        if (imgCache[p]) {
+          img.setAttribute('src', imgCache[p].dataUrl);
+          img.setAttribute('data-asset-id', imgCache[p].id);
+          continue;
+        }
+        // 体积保护（压缩前按原始大小判断）
+        const sz = zip.sizeOf ? zip.sizeOf(p) : -1;
+        if (sz > IMG_MAX_BYTES || (sz > 0 && imgBytes + sz > IMG_TOTAL_MAX_BYTES)) {
+          skippedImgs++;
+          img.remove();
+          continue;
+        }
+        const bin = await zip.read(p);
+        if (!bin) { img.remove(); continue; }
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bin.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bin.subarray(i, i + chunk));
+        }
+        let mime = /\.jpe?g$/i.test(p) ? 'image/jpeg'
+          : (/\.gif$/i.test(p) ? 'image/gif'
+          : (/\.webp$/i.test(p) ? 'image/webp' : 'image/png'));
+        let dataUrl = 'data:' + mime + ';base64,' + btoa(binary);
+        // 压缩（SVG 跳过）
+        const c = await compressImageDataUrl(dataUrl, mime);
+        if (c.changed) { dataUrl = c.dataUrl; mime = mimeFromDataUrl(dataUrl); compressedImgs++; }
+        const asset = { id: uid('img'), name: p.split('/').pop(), mime: mime, dataUrl: dataUrl };
+        imgBytes += Math.floor(dataUrl.length * 0.75);   // 按压缩后的实际占用累计
+        newAssets.push(asset);
+        img.setAttribute('src', asset.dataUrl);
+        img.setAttribute('data-asset-id', asset.id);
+        imgCache[p] = asset;
+      }
       const body = doc.body;
       const h = body ? body.querySelector('h1,h2,title') : null;
-      const title = h ? h.textContent.trim().slice(0, 60) : (doc.title || '章节');
-      if (h && /^(h1|h2)$/i.test(h.tagName)) h.remove();
-      chapters.push({ id: uid('ch'), title: title, html: body ? body.innerHTML : '', enabled: true });
+      // 目录中的标题优先（更准确），其次正文首个 h1/h2
+      const navTitle = navTitles[entry.path];
+      const title = navTitle ||
+        (h ? h.textContent.trim().slice(0, 60) : (doc.title || '章节'));
+      // 谨慎移除：仅当标题元素是「无 class 的普通结构标题」时才删。
+      // 像 <h2 class="head">①新生篇</h2> 这类带 class 的是装饰性标题（竖排花边等），
+      // 删掉会把整页设计毁掉（例：分卷页 body.juan1 背景图 + h2.head 花边）。
+      if (h && /^(h1|h2)$/i.test(h.tagName) && !h.getAttribute('class')) {
+        if (navTitle || h.textContent.trim().slice(0, 60) === title) h.remove();
+      }
+      // 保留 body 上的 class（如 body.juan1 承载分卷页的整页背景图）
+      const bodyClass = body ? (body.getAttribute('class') || '') : '';
+      chapters.push({
+        id: uid('ch'), title: title,
+        level: navLevels[entry.path] || 0,     // 0=未分级, 1=卷, 2=章…
+        bodyClass: bodyClass,                  // 原 <body class="...">，导出时还原
+        fromEpub: true,                        // 导出时不生成 chapter-title（原书自带标题）
+        html: body ? body.innerHTML : '', enabled: true
+      });
     }
+    // 合并原书 CSS：预先异步读取所有 url() 引用，再同步重写路径
+    const allCssParts = cssParts.concat(inlineStyles);
+    let mergedCss = '';
+    const resources = [];
+    let missingRefs = 0;
+    let skipped = 0;          // 超过体积上限而跳过的资源数（在块外声明，供下方提示使用）
+    if (allCssParts.length) {
+      const paths = [];
+      allCssParts.forEach(p => collectCssUrlPaths(p.text, p.dir).forEach(abs => {
+        if (paths.indexOf(abs) < 0) paths.push(abs);
+      }));
+      const binMap = {};
+      for (const abs of paths) {
+        const sz = zip.sizeOf ? zip.sizeOf(abs) : -1;
+        if (sz > CSS_RES_MAX_BYTES) { skipped++; continue; }
+        const bin = await zip.read(abs);
+        if (!bin) { skipped++; continue; }
+        const mime = mimeFromName(abs);
+        let dataUrl = 'data:' + mime + ';base64,' + u8ToBase64(bin);
+        // 位图走压缩（字体文件不压）
+        if (/^image\//i.test(mime) && !/svg/i.test(mime)) {
+          const c = await compressImageDataUrl(dataUrl, mime);
+          if (c.changed) { dataUrl = c.dataUrl; compressedImgs++; }
+        }
+        binMap[abs] = dataUrl;
+      }
+      allCssParts.forEach(p => {
+        const r = rewriteCssUrls(p.text, p.dir, (abs) => binMap[abs] || null);
+        missingRefs += r.missing;
+        r.resources.forEach(res => {
+          if (!resources.some(x => x.name === res.name)) resources.push(res);
+        });
+        if (r.css.trim()) mergedCss += (mergedCss ? '\n\n' : '') + r.css.trim();
+      });
+    }
+
+    /* —— 读取原书封面 ——
+       此前只导入了 dc:title 等元数据，从未处理 <meta name="cover">，
+       导致原书明明有封面，导入后却显示「无封面」。 */
+    let coverName = '';
+    let coverPath = '';
+    // 方式一：<meta name="cover" content="<manifest id>">
+    const coverMeta = /<meta[^>]+name=["']cover["'][^>]+content=["']([^"']+)["']/i.exec(opf) ||
+                      /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']cover["']/i.exec(opf);
+    if (coverMeta && items[coverMeta[1]]) {
+      coverName = coverMeta[1];
+      coverPath = items[coverMeta[1]].path;
+    }
+    if (!coverPath) {
+      // 方式二：manifest 里带 properties="cover-image"
+      const ci = /<item[^>]+properties=["'][^"']*cover-image[^"']*["'][^>]*>/i.exec(opf);
+      if (ci) {
+        const h = /href=["']([^"']+)["']/.exec(ci[0]);
+        if (h) { coverPath = resolvePath(opfPath, h[1]); coverName = h[1].split('/').pop(); }
+      }
+    }
+    if (!coverPath) {
+      // 方式三：按常见文件名猜测
+      const guess = Object.keys(items).map(k => items[k])
+        .find(i2 => /^image\//i.test(i2.mediaType) && /(^|\/)(cover|title|封面)[-_.]?\w*\.(png|jpe?g)$/i.test(i2.href));
+      if (guess) { coverPath = guess.path; coverName = guess.href.split('/').pop(); }
+    }
+
     state.project = emptyProject();
     Object.assign(state.project.meta, meta);
     state.project.chapters = chapters;
+    state.project.assets = newAssets;
+    // 封面必须在 emptyProject() 之后读取：readZipImageAsAsset 会往 state.project.assets 里推
+    if (coverPath) {
+      const asset = await readZipImageAsAsset(zip, coverPath, 'cover');
+      if (asset) state.project.meta.coverAssetId = asset.id;
+    }
+    state.project.customCss = mergedCss;
+    state.project.resources = resources;
     state.project.fileName = file.name;
     state.currentId = chapters.length ? chapters[0].id : null;
     afterLoad();
     saveSoon();
-    toast('已导入 EPUB：' + chapters.length + ' 章', 'ok');
+    const cssMsg = mergedCss
+      ? '，已保留原书样式（' + allCssParts.length + ' 个样式表' +
+        (resources.length ? '、' + resources.length + ' 个资源' : '') +
+        (missingRefs ? '，' + missingRefs + ' 处引用缺失' : '') +
+        (skipped ? '，' + skipped + ' 个超大文件已跳过' : '') + '）'
+      : '（未找到样式表）';
+    toast('已导入 EPUB：' + chapters.length + ' 章' + cssMsg +
+      (state.project.meta.coverAssetId ? '，封面已导入' : '') +
+      (skippedImgs ? '，' + skippedImgs + ' 张超体积图片已移除' : '') +
+      (compressedImgs ? '，' + compressedImgs + ' 张已压缩' : ''), 'ok');
+    // 后台生成缩略图（不阻塞导入完成提示）
+    generateThumbs();
   } catch (e) {
     console.error(e);
     toast('EPUB 导入失败：' + e.message, 'err');
