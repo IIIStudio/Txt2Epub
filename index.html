@@ -516,10 +516,7 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
             <input type="checkbox" id="t-indent" /><label class="track"></label></div>
           <div class="switch"><span class="lbl">标题居中</span>
             <input type="checkbox" id="t-titlecenter" /><label class="track"></label></div>
-          <div class="switch"><span class="lbl">正文两端对齐</span>
-            <input type="checkbox" id="t-justify" /><label class="track"></label></div>
-          <div class="range-row"><input type="range" id="t-titlesize" min="110" max="200" step="5" /><span class="val" id="v-titlesize">1.50em</span></div>
-          <div class="hint">国际风默认：左对齐 + 段间距分隔 + 无缩进。开启缩进会自动缩小段间距。</div>
+          <div class="range-row"><input type="range" id="t-titlesize" min="110" max="200" step="5" /><span class="val" id="v-titlesize">1.40em</span></div>
 
           <div class="section-title">强调色</div>
           <div class="mini-field" style="margin-bottom:8px"><label>标题颜色</label>
@@ -625,8 +622,6 @@ const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-/** 保留 3 位小数，避免生成 1.0639999999999998em 这类浮点噪音 */
-const round3 = (v) => Math.round(v * 1000) / 1000;
 function debounce(fn, ms) {
   let t;
   function wrapped() {
@@ -931,36 +926,15 @@ function stripHighlight(root) {
 }
 
 /* ------------------------- 4. 样式生成（编辑器 / 预览 / EPUB 共用） ------------------------- */
-/* 字体栈：拉丁部分优先 Inter（国际风代表字体），中文用思源黑体/苹方。
-   拉丁字体放在中文之前，让中英混排时英文用 Inter、中文自动回退到中文字体。 */
 const FONT_STACKS = {
-  sans: 'Inter,"Inter var","Helvetica Neue",Helvetica,Arial,"Noto Sans SC","Source Han Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif',
-  serif: '"Noto Serif SC","Source Han Serif SC","Songti SC",Georgia,"Times New Roman","SimSun",serif',
-  system: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif'
+  serif: '"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",Georgia,serif',
+  sans: '"Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif',
+  system: '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif'
 };
-/* 色板：国际风的克制中性灰阶（基于 Zinc 色阶），仅以单一强调色点缀 */
 const DOC_THEMES = {
-  light: {
-    bg: '#FFFFFF', fg: '#18181B',      // 近黑，不是纯黑
-    head: '#09090B',                   // 标题更重
-    sub: '#71717A',                    // 次要文字
-    rule: '#E4E4E7',                   // 分隔线
-    mark: '#D4D4D8'                    // 引用线
-  },
-  sepia: {
-    bg: '#FAF7F2', fg: '#2C2925',
-    head: '#1C1A17',
-    sub: '#7C756A',
-    rule: '#E6DFD4',
-    mark: '#D6CDBC'
-  },
-  dark: {
-    bg: '#131316', fg: '#D4D4D8',
-    head: '#FAFAFA',
-    sub: '#8E8E96',
-    rule: '#2A2A30',
-    mark: '#3A3A42'
-  }
+  light: { bg: '#FFFFFF', fg: '#1A1A1A', sub: '#5B6472' },
+  sepia: { bg: '#FBF6EC', fg: '#3A3226', sub: '#7A6E5C' },
+  dark: { bg: '#14171C', fg: '#D8DEE9', sub: '#8B95A5' }
 };
 function ruleDeclarations(r) {
   const s = r.style || {};
@@ -1010,28 +984,12 @@ function rulesCssText(rules) {
  */
 function docCssText(prefix, typo, rules, extraCss) {
   const th = DOC_THEMES[typo.theme] || DOC_THEMES.light;
-  const font = FONT_STACKS[typo.font] || FONT_STACKS.sans;
+  const font = FONT_STACKS[typo.font] || FONT_STACKS.serif;
   const unit = typo.fontSize + 'px';
-  const headColor = typo.headingColor || th.head;
   const titleAlign = typo.titleCenter ? 'center' : 'left';
-  // 国际风默认左对齐（ragged right）；两端对齐会让中文出现难看的字间距
-  const bodyAlign = typo.justify ? 'justify' : 'left';
-  const indentDecl = typo.indent
-    ? 'text-indent:2em;duokan-text-indent:2em;'
-    : 'text-indent:0;duokan-text-indent:0;';
-  // 开启缩进时缩小段间距（缩进与段间距是两种段落分隔法，不宜同时用）
-  const paraGap = (typo.paraSpacing / 100) * (typo.indent ? 0.45 : 1);
-  const ts = typo.titleSize / 100;
-
-  // prefix === 'body' 表示「这就是整个文档」（导出给阅读器），后代选择器写成**裸元素选择器**
-  // （p{…} 而不是 body p{…}）。原因：body p 特异性 (0,0,2) 会压过用户自定义 CSS 的 p (0,0,1)，
-  // 而预览里基础样式是 .preview-inner p (0,1,1)，与自定义相同 → 两边胜负相反，预览与成品不一致。
-  // 统一成裸元素选择器后，两边都由源码顺序决定，预览所见即导出所得。
-  const isRoot = (prefix === 'body');
-  const P = (s) => (isRoot ? s : prefix + ' ' + s);
-
+  const titleColor = typo.headingColor || th.fg;
+  const indentDecl = typo.indent ? 'text-indent:2em;duokan-text-indent:2em;' : 'text-indent:0;duokan-text-indent:0;';
   return [
-    '/* Txt2Epub Studio · International Style */',
     prefix + '{',
     '  font-family:' + font + ';',
     '  font-size:' + unit + ';',
@@ -1040,64 +998,32 @@ function docCssText(prefix, typo, rules, extraCss) {
     '  background:' + th.bg + ';',
     '  margin:0;',
     '  padding:0 ' + typo.margin + '%;',
-    '  text-align:' + bodyAlign + ';',
-    '  text-underline-position:under;',
-    '  hanging-punctuation:allow-end;',
+    '  text-align:justify;',
     '  word-wrap:break-word;',
-    '  orphans:2; widows:2;',
+    '  orphans:0; widows:0;',
     '}',
-    /* 段落：国际风以段间距分隔，默认不缩进 */
-    P('p') + '{margin:0 0 ' + round3(paraGap) + 'em;' + indentDecl + 'orphans:2;widows:2}',
-    /* 标题：清晰层级 + 负字距（国际风的经典手法）+ 与下文的亲密性（上疏下密）*/
-    [P('h1'), P('h2'), P('h3'), P('h4'), P('h5'), P('h6')].join(',') + '{',
-    '  font-weight:600; line-height:1.25; color:' + headColor + ';',
+    prefix + ' p{margin:0 0 ' + (typo.paraSpacing / 100) + 'em;' + indentDecl + 'orphans:0;widows:0}',
+    prefix + ' h1,' + prefix + ' h2,' + prefix + ' h3,' + prefix + ' h4{',
+    '  font-weight:700; line-height:1.35; margin:1.8em 0 .9em;',
     '  text-align:' + titleAlign + '; text-indent:0; duokan-text-indent:0;',
-    '  letter-spacing:-0.011em;',
-    '  orphans:2; widows:2;',
-    '  page-break-inside:avoid; page-break-after:avoid;',
+    '  color:' + titleColor + ';',
+    '  font-size:' + (typo.titleSize / 100) + 'em;',
+    '  orphans:0; widows:0;',
     '}',
-    P('h1') + '{margin:2.4em 0 .9em; font-size:' + round3(ts) + 'em; letter-spacing:-0.02em}',
-    P('h2') + '{margin:2em 0 .8em; font-size:' + round3(ts * 0.86) + 'em; letter-spacing:-0.015em}',
-    P('h3') + '{margin:1.7em 0 .7em; font-size:' + round3(ts * 0.74) + 'em}',
-    P('h4') + '{margin:1.4em 0 .6em; font-size:' + round3(ts * 0.64) + 'em; color:' + th.sub + '}',
-    /* 章节标题：几何短线 + 大留白，国际风的克制装饰 */
-    P('h1.chapter-title') + '{',
-    '  margin:0 0 1.4em; font-weight:600; letter-spacing:-0.02em;',
-    '  page-break-before:always; page-break-after:avoid;',
-    '}',
-    P('h1.chapter-title::before') + '{',
-    '  content:""; display:block; width:2.2em; height:2px;',
-    '  background:' + th.mark + '; margin:0 0 .62em;',
-    (typo.titleCenter ? '  margin-left:auto; margin-right:auto;' : ''),
-    '}',
-    /* 标题后的首段不再额外留白（亲密性原则）*/
-    P('h1 + p') + ',' + P('h2 + p') + ',' + P('h3 + p') + ',' + P('h4 + p') + '{margin-top:0}',
-    /* 强调：国际风用字重而非颜色，避免花哨 */
-    P('strong') + '{font-weight:700; color:' + (typo.emColor || headColor) + '}',
-    P('em') + '{font-style:italic}',
-    P('a') + '{color:inherit; text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:2px}',
-    /* 引用：细左线 + 灰字 */
-    P('blockquote') + '{margin:1.5em 0; padding:0 0 0 1.15em; border-left:2px solid ' +
-      th.mark + '; color:' + th.sub + '; text-indent:0; duokan-text-indent:0}',
-    P('blockquote p') + '{margin:0 0 .6em}',
-    P('ul') + ',' + P('ol') + '{margin:1em 0; padding-left:1.35em; text-indent:0; duokan-text-indent:0}',
-    P('li') + '{margin:.38em 0}',
-    P('li::marker') + '{color:' + th.sub + '}',
-    /* 分隔线：细、克制、全宽 */
-    P('hr') + '{border:0; border-top:1px solid ' + th.rule + '; margin:2.6em 0; width:100%}',
-    /* 图片与图注 */
-    P('figure') + '{margin:1.9em 0; text-align:center; text-indent:0; duokan-text-indent:0; page-break-inside:avoid}',
-    P('figure img') + '{max-width:100%; width:' + typo.imageWidth + '%; height:auto; display:block; margin:0 auto; border:0}',
-    P('figcaption') + '{margin-top:.75em; font-size:.8125em; line-height:1.5; color:' + th.sub +
-      '; letter-spacing:.01em; text-align:center; text-indent:0; duokan-text-indent:0}',
-    P('img') + '{max-width:100%; height:auto}',
-    /* 封面 */
-    P('.t2e-cover') + '{text-align:center; text-indent:0; duokan-text-indent:0; margin:0 auto 3em; page-break-after:always}',
-    P('.t2e-cover img') + '{width:' + (typo.coverWidth || 52) + '%; max-width:100%; height:auto; margin:0 auto}',
-    /* 表格（国际风：细线、无斑马纹）*/
-    P('table') + '{width:100%; border-collapse:collapse; margin:1.5em 0; font-size:.94em}',
-    P('th') + ',' + P('td') + '{border-bottom:1px solid ' + th.rule + '; padding:.5em .4em; text-align:left}',
-    P('th') + '{font-weight:600; color:' + headColor + '}',
+    prefix + ' h3{font-size:' + (typo.titleSize / 100 * 0.86) + 'em}',
+    prefix + ' h4{font-size:' + (typo.titleSize / 100 * 0.76) + 'em}',
+    prefix + ' strong{color:' + (typo.emColor || '#AB372F') + '; font-weight:700}',
+    prefix + ' em{font-style:italic}',
+    prefix + ' blockquote{margin:1em 0; padding:.4em 0 .4em 1em; border-left:3px solid ' + th.sub + '33; color:' + th.sub + '; text-indent:0; duokan-text-indent:0}',
+    prefix + ' ul,' + prefix + ' ol{margin:.6em 0; padding-left:2em; text-indent:0; duokan-text-indent:0}',
+    prefix + ' li{margin:.2em 0}',
+    prefix + ' hr{border:none; border-top:1px solid ' + th.sub + '40; margin:2em auto; width:50%}',
+    prefix + ' figure{margin:1em auto; text-align:center; text-indent:0; duokan-text-indent:0}',
+    prefix + ' figure img{max-width:100%; width:' + typo.imageWidth + '%; height:auto; display:block; margin:0 auto; border:0}',
+    prefix + ' figcaption{font-size:.82em; line-height:1.25em; color:' + th.sub + '; margin:.5em 0 0; text-align:center; text-indent:0; duokan-text-indent:0}',
+    prefix + ' img{max-width:100%; height:auto}',
+    prefix + ' .t2e-cover{text-align:center; text-indent:0; duokan-text-indent:0; margin:.5em auto; page-break-after:always}',
+    prefix + ' .t2e-cover img{width:' + (typo.coverWidth || 62) + '%; max-width:100%; height:auto; margin:0 auto}',
     '',
     rulesCssText(rules),
     extraCss ? '\n/* ---- 附加自定义 CSS ---- */\n' + extraCss : ''
@@ -1178,29 +1104,20 @@ function userCssText(prefix) {
 }
 
 /* ------------------------- 5. 状态 ------------------------- */
-/* 默认采用国际风（Swiss / International Typographic Style）：
-   · 无衬线（Inter + 思源黑体）
-   · 左对齐、ragged right（中文两端对齐会产生难看的字间距）
-   · 用段间距分隔段落，不用首行缩进
-   · 标题左对齐、负字距、上疏下密
-   用户仍可在「排版」面板中改回衬线字体、两端对齐、首行缩进、标题居中。 */
 const DEFAULT_TYPO = {
-  font: 'sans', theme: 'light', fontSize: 17, lineHeight: 175,
-  paraSpacing: 100, margin: 7, imageWidth: 100,
-  indent: false, titleCenter: false, titleSize: 150,
-  justify: false,
-  headingColor: '', emColor: '', coverWidth: 52
+  font: 'serif', theme: 'light', fontSize: 17, lineHeight: 185,
+  paraSpacing: 55, margin: 6, imageWidth: 100,
+  indent: true, titleCenter: true, titleSize: 140,
+  headingColor: '', emColor: '#AB372F', coverWidth: 62
 };
-/* 标题与强调色候选。key 为 '' 表示「跟随主题」（国际风的默认：不额外着色）*/
+/* 标题与强调色候选 */
 const HEADING_COLORS = [
-  { key: '', label: '主题黑', hint: '跟随主题标题色（国际风默认）' },
-  { key: '#09090B', label: '纯黑', hint: '' },
-  { key: '#3F3F46', label: '石墨', hint: '' },
-  { key: '#1E3A8A', label: '靛蓝', hint: '' },
-  { key: '#B50A02', label: '朱红', hint: '' }
+  { key: '', label: '同正文', hint: '跟随主题文字色' },
+  { key: '#B50A02', label: '朱红', hint: '' },
+  { key: '#248067', label: '墨绿', hint: '' },
+  { key: '#1E3A8A', label: '靛蓝', hint: '' }
 ];
 const EM_COLORS = [
-  { key: '', label: '同标题', hint: '国际风默认：用字重区分，不着色' },
   { key: '#AB372F', label: '绛红' },
   { key: '#B45309', label: '琥珀' },
   { key: '#4338CA', label: '靛蓝' },
@@ -2229,8 +2146,8 @@ function initTypoPanel() {
   bindColorChips('#chips-em-color', EM_COLORS, 'emColor');
   const customCssEl = $('#t-customcss');
   customCssEl.value = state.project.customCss || '';
-  const ind = $('#t-indent'), tc = $('#t-titlecenter'), jf = $('#t-justify');
-  ind.checked = !!t.indent; tc.checked = !!t.titleCenter; jf.checked = !!t.justify;
+  const ind = $('#t-indent'), tc = $('#t-titlecenter');
+  ind.checked = !!t.indent; tc.checked = !!t.titleCenter;
   $$('#chips-font .chip').forEach(c =>
     c.classList.toggle('on', c.getAttribute('data-font') === t.font));
   $$('#chips-theme .chip').forEach(c =>
@@ -2251,7 +2168,7 @@ function initTypoPanel() {
     state.project.typography[key] = el.checked;
     refreshDocStyle(); refreshPreview(); saveSoon();
   });
-  onSwitch(ind, 'indent'); onSwitch(tc, 'titleCenter'); onSwitch(jf, 'justify');
+  onSwitch(ind, 'indent'); onSwitch(tc, 'titleCenter');
   $$('#chips-font .chip').forEach(c => c.onclick = () => {
     $$('#chips-font .chip').forEach(x => x.classList.remove('on'));
     c.classList.add('on');
@@ -2325,25 +2242,17 @@ function refreshPreview() {
     $('#preview-extra-style').textContent = '';   // 附加 CSS 只在预览生效，不污染编辑区
     return;
   }
-  // 预览 = 导出 CSS 原封不动加一层作用域。
-  // 不要「只把自定义 CSS 加作用域」：那样基础样式走 .t2e-doc p (0,1,1)，
-  // 而导出里是裸 p (0,0,1)，特异性不同 → 预览与成品不一致。
-  const p = state.project;
-  const epubCss = docCssText('body', p.typography, p.rules) + '\n' +
-    'h1.chapter-title{page-break-before:always;}\n' +
-    'h1.chapter-title:first-child{page-break-before:auto;}\n' +
-    (userCssText('body') ? userCssText('body') + '\n' : '');
-  $('#preview-extra-style').textContent = scopeCss(epubCss, '.preview-inner');
+  $('#preview-extra-style').textContent = userCssText('.preview-inner');
   const inner = $('#preview-inner');
+  const p = state.project;
   inner.innerHTML = p.chapters.filter(c => (c.html || '').trim())
-    .map(c => '<h1 class="chapter-title">' + esc(c.title || '') + '</h1>' + c.html).join('\n')
-    || '<p>（暂无内容）</p>';
+    .map(c => '<h1>' + esc(c.title || '') + '</h1>' + c.html).join('\n') || '<p>（暂无内容）</p>';
   const th = DOC_THEMES[state.project.typography.theme] || DOC_THEMES.light;
   inner.style.background = th.bg;
   inner.style.color = th.fg;
   frame.style.background = th.bg;
-  // 预览自带完整作用域样式，不再依赖编辑区的 .t2e-doc，避免两套基础样式并存
-  inner.className = 'preview-inner';
+  // 让预览继承文档排版
+  inner.className = 'preview-inner t2e-doc';
 }
 $('#btn-preview-refresh').onclick = refreshPreview;
 $$('#chips-preview-width .chip').forEach(c => c.onclick = () => {
