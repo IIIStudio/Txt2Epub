@@ -181,12 +181,13 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 .findbar .input{height:28px; width:180px}
 
 .editor-wrap{flex:1; overflow:auto; min-height:0; background:var(--surface); padding:24px 20px 120px}
-.editor-page{max-width:760px; margin:0 auto; background:var(--bg); border:1px solid var(--border);
+/* 编辑页即「纸张」：背景/前景由 JS 按文档主题注入（--doc-bg / --doc-fg），
+   这样切换纸感米 / 夜间主题时编辑区会立刻变化，与导出一致。 */
+.editor-page{max-width:760px; margin:0 auto;
+  background:var(--doc-bg, var(--bg)); color:var(--doc-fg, var(--text));
+  border:1px solid var(--border);
   border-radius:var(--r-lg); box-shadow:var(--shadow); padding:44px 52px 72px; min-height:100%}
-.chapter-title-input{
-  width:100%; border:none; outline:none; background:transparent; font-size:24px; font-weight:700;
-  letter-spacing:-.01em; margin-bottom:22px; color:var(--text); padding:0;
-}
+.chapter-title-wrap{margin-bottom:0}
 .editor-surface{outline:none; min-height:320px}
 .editor-surface:empty::before{content:"在此开始编辑正文，或从左侧选择章节…"; color:var(--faint)}
 /* 编辑器内图片：悬停/选中时提供明确的删除入口
@@ -251,13 +252,6 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 .color-input input[type=text]{flex:1; height:26px; padding:0 6px; font-family:var(--font-mono); font-size:11px;
   border:1px solid var(--border); border-radius:4px; background:var(--bg); outline:none}
 
-/* 预览 */
-.preview-toolbar{display:flex; align-items:center; gap:6px; padding:8px 12px; border-bottom:1px solid var(--border)}
-.preview-stage{background:var(--surface-2); padding:16px; overflow:auto; min-height:0; flex:1; display:flex; justify-content:center}
-.preview-frame{background:#fff; border-radius:var(--r-md); box-shadow:var(--shadow); overflow:hidden;
-  width:100%; max-width:100%; transition:width .2s ease-out; align-self:flex-start}
-.preview-inner{padding:36px 30px; max-height:none}
-
 /* 状态栏 */
 .statusbar{
   height:26px; flex:none; display:flex; align-items:center; gap:14px; padding:0 14px;
@@ -313,7 +307,7 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 .t2e-doc p{margin:0 0 .55em}
 </style>
 <style id="doc-style"></style>
-<style id="preview-extra-style"></style>
+
 </head>
 <body>
 <div class="app">
@@ -396,8 +390,13 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
       </div>
 
       <div class="editor-wrap" id="editor-wrap">
-        <div class="editor-page">
-          <input class="chapter-title-input" id="chapter-title" placeholder="章节标题" />
+        <div class="editor-page t2e-doc-page" id="editor-page">
+          <!-- 标题短线：模拟导出样式里 h1.chapter-title::before 的几何短线
+               （input 元素不支持伪元素，故用一个真实元素承载） -->
+          <div class="chapter-title-wrap">
+            <span class="chapter-title-rule" id="chapter-title-rule"></span>
+            <input class="chapter-title-input" id="chapter-title" placeholder="章节标题" />
+          </div>
           <div class="editor-surface t2e-doc" id="editor" contenteditable="true" spellcheck="false"></div>
           <textarea class="src-area" id="src-area" spellcheck="false"></textarea>
         </div>
@@ -419,7 +418,6 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
         <button class="tab on" data-tab="meta">元数据</button>
         <button class="tab" data-tab="typo">排版</button>
         <button class="tab" data-tab="rules">高亮规则</button>
-        <button class="tab" data-tab="preview">预览</button>
       </div>
 
       <!-- 元数据 -->
@@ -491,10 +489,12 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 
           <div class="section-title">正文字体</div>
           <div class="chips" id="chips-font">
-            <button class="chip on" data-font="serif">衬线（宋体）</button>
+            <button class="chip on" data-font="system">系统默认</button>
             <button class="chip" data-font="sans">无衬线（黑体）</button>
-            <button class="chip" data-font="system">系统默认</button>
+            <button class="chip" data-font="serif">衬线（宋体）</button>
           </div>
+          <div class="hint">系统默认 = 各平台原生界面字体（macOS 苹方 / Windows 雅黑 / Android 思源黑体），
+            无需下载、加载最快、兼容性最好。</div>
 
           <div class="section-title">配色主题</div>
           <div class="chips" id="chips-theme">
@@ -516,13 +516,18 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
             <input type="checkbox" id="t-indent" /><label class="track"></label></div>
           <div class="switch"><span class="lbl">标题居中</span>
             <input type="checkbox" id="t-titlecenter" /><label class="track"></label></div>
-          <div class="range-row"><input type="range" id="t-titlesize" min="110" max="200" step="5" /><span class="val" id="v-titlesize">1.40em</span></div>
+          <div class="switch"><span class="lbl">正文两端对齐</span>
+            <input type="checkbox" id="t-justify" /><label class="track"></label></div>
+          <div class="range-row"><input type="range" id="t-titlesize" min="110" max="200" step="5" /><span class="val" id="v-titlesize">1.50em</span></div>
+          <div class="hint">国际风默认：左对齐 + 段间距分隔 + 无缩进。开启缩进会自动缩小段间距。</div>
 
           <div class="section-title">强调色</div>
           <div class="mini-field" style="margin-bottom:8px"><label>标题颜色</label>
             <div class="chips" id="chips-heading-color"></div></div>
           <div class="mini-field"><label>加粗强调（strong）</label>
             <div class="chips" id="chips-em-color"></div></div>
+          <div class="hint">标题颜色作用于章节标题与正文中的标题；强调色作用于加粗文字。
+            若当前章节没有这些元素，编辑区不会出现变化。</div>
 
           <div class="section-title">封面</div>
           <div class="range-row"><input type="range" id="t-coverwidth" min="30" max="100" step="1" /><span class="val" id="v-coverwidth">62%</span></div>
@@ -559,23 +564,6 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
           </div>
         </div>
 
-        <!-- 预览 -->
-        <div class="tab-panel" data-panel="preview" style="padding:0; height:100%; display:none; flex-direction:column">
-          <div class="preview-toolbar">
-            <div class="chips" id="chips-preview-width">
-              <button class="chip on" data-w="100">适应</button>
-              <button class="chip" data-w="375">手机</button>
-              <button class="chip" data-w="600">平板</button>
-            </div>
-            <div class="spacer"></div>
-            <button class="btn sm" id="btn-preview-refresh">刷新</button>
-          </div>
-          <div class="preview-stage">
-            <div class="preview-frame" id="preview-frame">
-              <div class="preview-inner t2e-doc" id="preview-inner"></div>
-            </div>
-          </div>
-        </div>
       </div>
     </aside>
   </div>
@@ -604,6 +592,7 @@ button,input,select,textarea{font-family:inherit; font-size:inherit; color:inher
 <input type="file" id="cover-input" accept="image/*" hidden />
 <input type="file" id="epub-input" accept=".epub" hidden />
 <input type="file" id="rules-input" accept=".json,application/json" hidden />
+<input type="file" id="project-input" accept=".json,application/json" hidden />
 <div id="toasts"></div>
 
 <script>
@@ -622,6 +611,8 @@ const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+/** 保留 3 位小数，避免生成 1.0639999999999998em 这类浮点噪音 */
+const round3 = (v) => Math.round(v * 1000) / 1000;
 function debounce(fn, ms) {
   let t;
   function wrapped() {
@@ -814,7 +805,7 @@ const DEFAULT_RULES = [
   { id: 'dlg-cn2', name: '对话『』', open: '『', close: '』', enabled: true, priority: 11,
     style: { underline: 'solid', underlineColor: '#16A34A', underlineThickness: 2 } },
   { id: 'dlg-quote', name: '对话“”', open: '“', close: '”', enabled: true, priority: 12,
-    style: { underline: 'solid', underlineColor: '#16A34A', underlineThickness: 2 } },
+    style: { color: '#447E55', underline: 'solid', underlineColor: '#447e55', underlineThickness: 2 } },
   { id: 'dlg-en', name: '对话 ""', open: '"', close: '"', enabled: true, priority: 13,
     style: { underline: 'solid', underlineColor: '#16A34A', underlineThickness: 2 } },
   { id: 'note', name: '提示／旁白【】', open: '【', close: '】', enabled: true, priority: 20,
@@ -926,15 +917,39 @@ function stripHighlight(root) {
 }
 
 /* ------------------------- 4. 样式生成（编辑器 / 预览 / EPUB 共用） ------------------------- */
+/* 字体栈。顺序与 UI 中「正文字体」chips 保持一致（系统默认在前）。
+   三者分别适用：
+   · system —— 平台原生界面字体，零依赖、加载最快、兼容性最好（默认）
+   · sans   —— 拉丁用 Inter（国际风代表字体）+ 中文思源黑体，需系统已装 Inter 才最美观
+   · serif  —— 思源宋体 / 宋体，适合长篇阅读 */
 const FONT_STACKS = {
-  serif: '"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",Georgia,serif',
-  sans: '"Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif',
-  system: '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif'
+  system: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif',
+  sans: 'Inter,"Inter var","Helvetica Neue",Helvetica,Arial,"Noto Sans SC","Source Han Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif',
+  serif: '"Noto Serif SC","Source Han Serif SC","Songti SC",Georgia,"Times New Roman","SimSun",serif'
 };
+/* 色板：国际风的克制中性灰阶（基于 Zinc 色阶），仅以单一强调色点缀 */
 const DOC_THEMES = {
-  light: { bg: '#FFFFFF', fg: '#1A1A1A', sub: '#5B6472' },
-  sepia: { bg: '#FBF6EC', fg: '#3A3226', sub: '#7A6E5C' },
-  dark: { bg: '#14171C', fg: '#D8DEE9', sub: '#8B95A5' }
+  light: {
+    bg: '#FFFFFF', fg: '#18181B',      // 近黑，不是纯黑
+    head: '#09090B',                   // 标题更重
+    sub: '#71717A',                    // 次要文字
+    rule: '#E4E4E7',                   // 分隔线
+    mark: '#D4D4D8'                    // 引用线
+  },
+  sepia: {
+    bg: '#FAF7F2', fg: '#2C2925',
+    head: '#1C1A17',
+    sub: '#7C756A',
+    rule: '#E6DFD4',
+    mark: '#D6CDBC'
+  },
+  dark: {
+    bg: '#131316', fg: '#D4D4D8',
+    head: '#FAFAFA',
+    sub: '#8E8E96',
+    rule: '#2A2A30',
+    mark: '#3A3A42'
+  }
 };
 function ruleDeclarations(r) {
   const s = r.style || {};
@@ -984,12 +999,28 @@ function rulesCssText(rules) {
  */
 function docCssText(prefix, typo, rules, extraCss) {
   const th = DOC_THEMES[typo.theme] || DOC_THEMES.light;
-  const font = FONT_STACKS[typo.font] || FONT_STACKS.serif;
+  const font = FONT_STACKS[typo.font] || FONT_STACKS.system;
   const unit = typo.fontSize + 'px';
+  const headColor = typo.headingColor || th.head;
   const titleAlign = typo.titleCenter ? 'center' : 'left';
-  const titleColor = typo.headingColor || th.fg;
-  const indentDecl = typo.indent ? 'text-indent:2em;duokan-text-indent:2em;' : 'text-indent:0;duokan-text-indent:0;';
+  // 国际风默认左对齐（ragged right）；两端对齐会让中文出现难看的字间距
+  const bodyAlign = typo.justify ? 'justify' : 'left';
+  const indentDecl = typo.indent
+    ? 'text-indent:2em;duokan-text-indent:2em;'
+    : 'text-indent:0;duokan-text-indent:0;';
+  // 开启缩进时缩小段间距（缩进与段间距是两种段落分隔法，不宜同时用）
+  const paraGap = (typo.paraSpacing / 100) * (typo.indent ? 0.45 : 1);
+  const ts = typo.titleSize / 100;
+
+  // prefix === 'body' 表示「这就是整个文档」（导出给阅读器），后代选择器写成**裸元素选择器**
+  // （p{…} 而不是 body p{…}）。原因：body p 特异性 (0,0,2) 会压过用户自定义 CSS 的 p (0,0,1)，
+  // 而编辑区的基础样式被作用域化成 .editor-surface p (0,1,1)，与自定义相同 → 两边胜负相反，
+  // 编辑区与成品不一致。统一成裸元素选择器后，两边都由源码顺序决定，所见即所得。
+  const isRoot = (prefix === 'body');
+  const P = (s) => (isRoot ? s : prefix + ' ' + s);
+
   return [
+    '/* Txt2Epub Studio · International Style */',
     prefix + '{',
     '  font-family:' + font + ';',
     '  font-size:' + unit + ';',
@@ -998,32 +1029,64 @@ function docCssText(prefix, typo, rules, extraCss) {
     '  background:' + th.bg + ';',
     '  margin:0;',
     '  padding:0 ' + typo.margin + '%;',
-    '  text-align:justify;',
+    '  text-align:' + bodyAlign + ';',
+    '  text-underline-position:under;',
+    '  hanging-punctuation:allow-end;',
     '  word-wrap:break-word;',
-    '  orphans:0; widows:0;',
+    '  orphans:2; widows:2;',
     '}',
-    prefix + ' p{margin:0 0 ' + (typo.paraSpacing / 100) + 'em;' + indentDecl + 'orphans:0;widows:0}',
-    prefix + ' h1,' + prefix + ' h2,' + prefix + ' h3,' + prefix + ' h4{',
-    '  font-weight:700; line-height:1.35; margin:1.8em 0 .9em;',
+    /* 段落：国际风以段间距分隔，默认不缩进 */
+    P('p') + '{margin:0 0 ' + round3(paraGap) + 'em;' + indentDecl + 'orphans:2;widows:2}',
+    /* 标题：清晰层级 + 负字距（国际风的经典手法）+ 与下文的亲密性（上疏下密）*/
+    [P('h1'), P('h2'), P('h3'), P('h4'), P('h5'), P('h6')].join(',') + '{',
+    '  font-weight:600; line-height:1.25; color:' + headColor + ';',
     '  text-align:' + titleAlign + '; text-indent:0; duokan-text-indent:0;',
-    '  color:' + titleColor + ';',
-    '  font-size:' + (typo.titleSize / 100) + 'em;',
-    '  orphans:0; widows:0;',
+    '  letter-spacing:-0.011em;',
+    '  orphans:2; widows:2;',
+    '  page-break-inside:avoid; page-break-after:avoid;',
     '}',
-    prefix + ' h3{font-size:' + (typo.titleSize / 100 * 0.86) + 'em}',
-    prefix + ' h4{font-size:' + (typo.titleSize / 100 * 0.76) + 'em}',
-    prefix + ' strong{color:' + (typo.emColor || '#AB372F') + '; font-weight:700}',
-    prefix + ' em{font-style:italic}',
-    prefix + ' blockquote{margin:1em 0; padding:.4em 0 .4em 1em; border-left:3px solid ' + th.sub + '33; color:' + th.sub + '; text-indent:0; duokan-text-indent:0}',
-    prefix + ' ul,' + prefix + ' ol{margin:.6em 0; padding-left:2em; text-indent:0; duokan-text-indent:0}',
-    prefix + ' li{margin:.2em 0}',
-    prefix + ' hr{border:none; border-top:1px solid ' + th.sub + '40; margin:2em auto; width:50%}',
-    prefix + ' figure{margin:1em auto; text-align:center; text-indent:0; duokan-text-indent:0}',
-    prefix + ' figure img{max-width:100%; width:' + typo.imageWidth + '%; height:auto; display:block; margin:0 auto; border:0}',
-    prefix + ' figcaption{font-size:.82em; line-height:1.25em; color:' + th.sub + '; margin:.5em 0 0; text-align:center; text-indent:0; duokan-text-indent:0}',
-    prefix + ' img{max-width:100%; height:auto}',
-    prefix + ' .t2e-cover{text-align:center; text-indent:0; duokan-text-indent:0; margin:.5em auto; page-break-after:always}',
-    prefix + ' .t2e-cover img{width:' + (typo.coverWidth || 62) + '%; max-width:100%; height:auto; margin:0 auto}',
+    P('h1') + '{margin:2.4em 0 .9em; font-size:' + round3(ts) + 'em; letter-spacing:-0.02em}',
+    P('h2') + '{margin:2em 0 .8em; font-size:' + round3(ts * 0.86) + 'em; letter-spacing:-0.015em}',
+    P('h3') + '{margin:1.7em 0 .7em; font-size:' + round3(ts * 0.74) + 'em}',
+    P('h4') + '{margin:1.4em 0 .6em; font-size:' + round3(ts * 0.64) + 'em; color:' + th.sub + '}',
+    /* 章节标题：几何短线 + 大留白，国际风的克制装饰 */
+    P('h1.chapter-title') + '{',
+    '  margin:0 0 1.4em; font-weight:600; letter-spacing:-0.02em;',
+    '  page-break-before:always; page-break-after:avoid;',
+    '}',
+    P('h1.chapter-title::before') + '{',
+    '  content:""; display:block; width:2.2em; height:2px;',
+    '  background:' + th.mark + '; margin:0 0 .62em;',
+    (typo.titleCenter ? '  margin-left:auto; margin-right:auto;' : ''),
+    '}',
+    /* 标题后的首段不再额外留白（亲密性原则）*/
+    P('h1 + p') + ',' + P('h2 + p') + ',' + P('h3 + p') + ',' + P('h4 + p') + '{margin-top:0}',
+    /* 强调：国际风用字重而非颜色，避免花哨 */
+    P('strong') + '{font-weight:700; color:' + (typo.emColor || headColor) + '}',
+    P('em') + '{font-style:italic}',
+    P('a') + '{color:inherit; text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:2px}',
+    /* 引用：细左线 + 灰字 */
+    P('blockquote') + '{margin:1.5em 0; padding:0 0 0 1.15em; border-left:2px solid ' +
+      th.mark + '; color:' + th.sub + '; text-indent:0; duokan-text-indent:0}',
+    P('blockquote p') + '{margin:0 0 .6em}',
+    P('ul') + ',' + P('ol') + '{margin:1em 0; padding-left:1.35em; text-indent:0; duokan-text-indent:0}',
+    P('li') + '{margin:.38em 0}',
+    P('li::marker') + '{color:' + th.sub + '}',
+    /* 分隔线：细、克制、全宽 */
+    P('hr') + '{border:0; border-top:1px solid ' + th.rule + '; margin:2.6em 0; width:100%}',
+    /* 图片与图注 */
+    P('figure') + '{margin:1.9em 0; text-align:center; text-indent:0; duokan-text-indent:0; page-break-inside:avoid}',
+    P('figure img') + '{max-width:100%; width:' + typo.imageWidth + '%; height:auto; display:block; margin:0 auto; border:0}',
+    P('figcaption') + '{margin-top:.75em; font-size:.8125em; line-height:1.5; color:' + th.sub +
+      '; letter-spacing:.01em; text-align:center; text-indent:0; duokan-text-indent:0}',
+    P('img') + '{max-width:100%; height:auto}',
+    /* 封面 */
+    P('.t2e-cover') + '{text-align:center; text-indent:0; duokan-text-indent:0; margin:0 auto 3em; page-break-after:always}',
+    P('.t2e-cover img') + '{width:' + (typo.coverWidth || 52) + '%; max-width:100%; height:auto; margin:0 auto}',
+    /* 表格（国际风：细线、无斑马纹）*/
+    P('table') + '{width:100%; border-collapse:collapse; margin:1.5em 0; font-size:.94em}',
+    P('th') + ',' + P('td') + '{border-bottom:1px solid ' + th.rule + '; padding:.5em .4em; text-align:left}',
+    P('th') + '{font-weight:600; color:' + headColor + '}',
     '',
     rulesCssText(rules),
     extraCss ? '\n/* ---- 附加自定义 CSS ---- */\n' + extraCss : ''
@@ -1075,12 +1138,18 @@ function scopeCss(css, scope) {
       const head = buf.trim(); buf = '';
       if (head.charAt(0) === '@') {
         const kw = (head.match(/^@([a-z-]+)/i) || ['', ''])[1].toLowerCase();
+        // 整块保留的 at-rule：加作用域会失效（如 @font-face 的 src）
         if (/^(font-face|page|import|charset|namespace)$/.test(kw) || kw.indexOf('keyframes') >= 0) {
           const block = readBlock(i);
           out.push(head + ' ' + block);
           i += block.length;
           continue;
         }
+        // 容器型 at-rule（@media / @supports …）：头部**原样**输出，内部规则在递归时自然被作用域化。
+        // 若对头部调用 scoped()，会得到 `.editor-surface @supports not (...)` 这种非法选择器。
+        out.push(head + ' {');
+        i++;
+        continue;
       }
       out.push(scoped(head) + ' {');
       i++;
@@ -1104,20 +1173,30 @@ function userCssText(prefix) {
 }
 
 /* ------------------------- 5. 状态 ------------------------- */
+/* 默认采用国际风（Swiss / International Typographic Style）：
+   · 字体用「系统默认」：零依赖、加载最快、兼容性最好（可切换为 Inter / 思源宋体）
+   · 左对齐、ragged right（中文两端对齐会产生难看的字间距）
+   · 用段间距分隔段落，不用首行缩进
+   · 标题左对齐、负字距、上疏下密
+   · 强调用字重而非颜色
+   用户仍可在「排版」面板中改为两端对齐、首行缩进、标题居中、衬线字体等。 */
 const DEFAULT_TYPO = {
-  font: 'serif', theme: 'light', fontSize: 17, lineHeight: 185,
-  paraSpacing: 55, margin: 6, imageWidth: 100,
-  indent: true, titleCenter: true, titleSize: 140,
-  headingColor: '', emColor: '#AB372F', coverWidth: 62
+  font: 'system', theme: 'light', fontSize: 17, lineHeight: 175,
+  paraSpacing: 100, margin: 7, imageWidth: 100,
+  indent: false, titleCenter: false, titleSize: 150,
+  justify: false,
+  headingColor: '', emColor: '', coverWidth: 52
 };
-/* 标题与强调色候选 */
+/* 标题与强调色候选。key 为 '' 表示「跟随主题」（国际风的默认：不额外着色）*/
 const HEADING_COLORS = [
-  { key: '', label: '同正文', hint: '跟随主题文字色' },
-  { key: '#B50A02', label: '朱红', hint: '' },
-  { key: '#248067', label: '墨绿', hint: '' },
-  { key: '#1E3A8A', label: '靛蓝', hint: '' }
+  { key: '', label: '主题黑', hint: '跟随主题标题色（国际风默认）' },
+  { key: '#09090B', label: '纯黑', hint: '' },
+  { key: '#3F3F46', label: '石墨', hint: '' },
+  { key: '#1E3A8A', label: '靛蓝', hint: '' },
+  { key: '#B50A02', label: '朱红', hint: '' }
 ];
 const EM_COLORS = [
+  { key: '', label: '同标题', hint: '国际风默认：用字重区分，不着色' },
   { key: '#AB372F', label: '绛红' },
   { key: '#B45309', label: '琥珀' },
   { key: '#4338CA', label: '靛蓝' },
@@ -1145,18 +1224,61 @@ function emptyProject() {
 const state = {
   project: emptyProject(),
   currentId: null,
-  sourceMode: false,
-  previewWidth: 100
+  sourceMode: false
 };
 function currentChapter() {
   return state.project.chapters.find(c => c.id === state.currentId) || null;
 }
 
-/* ------------------------- 6. 样式注入与章节渲染 ------------------------- */
+/* ------------------------- 6. 样式注入与章节渲染 -------------------------
+ * 编辑区即所见即所得：把「导出 CSS 原样作用域化到 .t2e-doc」注入编辑区。
+ * 此前编辑区只有基础排版、自定义 CSS 仅作用于独立预览面板，
+ * 导致改了自定义 CSS 必须切到预览才看得到，两边还常因特异性不同而结果不一致。
+ * 现在只有一个样式源，编辑区看到的就是导出的效果。
+ * ---------------------------------------------------------------------- */
 function refreshDocStyle() {
   const p = state.project;
-  // 模板/自定义 CSS 只作用于预览与导出，不注入编辑区，避免破坏编辑界面
-  $('#doc-style').textContent = docCssText('.t2e-doc', p.typography, p.rules);
+  // 与导出完全同源：docCssText('body') 生成裸元素选择器，再整体作用域化到编辑区容器
+  const exportCss = docCssText('body', p.typography, p.rules) + '\n' +
+    (userCssText('body') ? userCssText('body') + '\n' : '');
+  $('#doc-style').textContent = scopeCss(exportCss, '.editor-surface') +
+    '\n' + editorTitleCss();
+  // 把文档主题色交给「纸张」容器，让编辑区纸面与导出一致
+  const th = DOC_THEMES[p.typography.theme] || DOC_THEMES.light;
+  const page = $('#editor-page');
+  if (page) {
+    page.style.setProperty('--doc-bg', th.bg);
+    page.style.setProperty('--doc-fg', th.fg);
+  }
+  const wrap = $('#editor-wrap');
+  if (wrap) wrap.style.background = th.bg === '#FFFFFF' ? 'var(--surface)' : th.bg;
+}
+/**
+ * 章节标题输入框的样式。
+ * 编辑区的标题是 <input>（不支持伪元素），无法直接用 h1.chapter-title::before，
+ * 故把标题规则单独同步给 .chapter-title-input 与 .chapter-title-rule。
+ */
+function editorTitleCss() {
+  const p = state.project;
+  const ty = p.typography;
+  const th = DOC_THEMES[ty.theme] || DOC_THEMES.light;
+  const headColor = ty.headingColor || th.head;
+  const font = FONT_STACKS[ty.font] || FONT_STACKS.system;
+  const center = ty.titleCenter;
+  const ts = ty.titleSize / 100;
+  return [
+    '.chapter-title-wrap{display:flex; flex-direction:column; align-items:' +
+      (center ? 'center' : 'flex-start') + '; margin-bottom:1.4em}',
+    '.chapter-title-rule{display:block; width:' + round3(2.2 * ts) + 'em; height:2px; ' +
+      'background:' + th.mark + '; margin:0 0 .62em; flex:none}',
+    '.chapter-title-input{' +
+      'font-family:' + font + ';' +
+      'font-size:' + round3(ty.fontSize * ts) + 'px;' +
+      'font-weight:600; line-height:1.25; color:' + headColor + ';' +
+      'text-align:' + (center ? 'center' : 'left') + ';' +
+      'letter-spacing:-0.02em; width:100%;' +
+      'border:none; outline:none; background:transparent; padding:0; margin:0}'
+  ].join('\n');
 }
 function renderChapterList() {
   const list = $('#chapter-list');
@@ -2146,8 +2268,8 @@ function initTypoPanel() {
   bindColorChips('#chips-em-color', EM_COLORS, 'emColor');
   const customCssEl = $('#t-customcss');
   customCssEl.value = state.project.customCss || '';
-  const ind = $('#t-indent'), tc = $('#t-titlecenter');
-  ind.checked = !!t.indent; tc.checked = !!t.titleCenter;
+  const ind = $('#t-indent'), tc = $('#t-titlecenter'), jf = $('#t-justify');
+  ind.checked = !!t.indent; tc.checked = !!t.titleCenter; jf.checked = !!t.justify;
   $$('#chips-font .chip').forEach(c =>
     c.classList.toggle('on', c.getAttribute('data-font') === t.font));
   $$('#chips-theme .chip').forEach(c =>
@@ -2168,7 +2290,7 @@ function initTypoPanel() {
     state.project.typography[key] = el.checked;
     refreshDocStyle(); refreshPreview(); saveSoon();
   });
-  onSwitch(ind, 'indent'); onSwitch(tc, 'titleCenter');
+  onSwitch(ind, 'indent'); onSwitch(tc, 'titleCenter'); onSwitch(jf, 'justify');
   $$('#chips-font .chip').forEach(c => c.onclick = () => {
     $$('#chips-font .chip').forEach(x => x.classList.remove('on'));
     c.classList.add('on');
@@ -2227,40 +2349,18 @@ $$('.tab').forEach(tab => {
       const on = p.getAttribute('data-panel') === name;
       p.classList.toggle('on', on);
       // 必须显式重置每个面板的 display：
-      // 预览面板需要 flex 以撑满高度，其余用 block；
-      // 若只对预览分支赋值，离开预览后残留的 inline `display:none` 会覆盖 .on 类，导致切回无反应。
-      p.style.display = on ? (name === 'preview' ? 'flex' : 'block') : 'none';
+      // 必须显式重置每个面板的 display：
+      // 若只对某一个分支赋值，之后残留的 inline `display:none` 会覆盖 .on 类，导致切回无反应。
+      p.style.display = on ? 'block' : 'none';
     });
-    if (name === 'preview') refreshPreview();
-    else $('#preview-extra-style').textContent = '';   // 附加 CSS 仅在预览生效
   };
 });
+/** 刷新文档样式（编辑区所见即所得）。
+ *  历史上有独立的预览面板，现已移除——预览与编辑区是两套样式，改了还得切过去看，且常不一致。
+ *  保留此函数是为了让既有调用点无需改动。 */
 function refreshPreview() {
-  const frame = $('#preview-frame');
-  frame.style.width = state.previewWidth === 100 ? '100%' : state.previewWidth + 'px';
-  if (!$('.tab[data-tab="preview"]').classList.contains('on')) {
-    $('#preview-extra-style').textContent = '';   // 附加 CSS 只在预览生效，不污染编辑区
-    return;
-  }
-  $('#preview-extra-style').textContent = userCssText('.preview-inner');
-  const inner = $('#preview-inner');
-  const p = state.project;
-  inner.innerHTML = p.chapters.filter(c => (c.html || '').trim())
-    .map(c => '<h1>' + esc(c.title || '') + '</h1>' + c.html).join('\n') || '<p>（暂无内容）</p>';
-  const th = DOC_THEMES[state.project.typography.theme] || DOC_THEMES.light;
-  inner.style.background = th.bg;
-  inner.style.color = th.fg;
-  frame.style.background = th.bg;
-  // 让预览继承文档排版
-  inner.className = 'preview-inner t2e-doc';
+  refreshDocStyle();
 }
-$('#btn-preview-refresh').onclick = refreshPreview;
-$$('#chips-preview-width .chip').forEach(c => c.onclick = () => {
-  $$('#chips-preview-width .chip').forEach(x => x.classList.remove('on'));
-  c.classList.add('on');
-  state.previewWidth = +c.getAttribute('data-w');
-  refreshPreview();
-});
 
 /* ------------------------- 15. 下载工具 ------------------------- */
 function downloadBlob(blob, filename) {
@@ -2736,35 +2836,125 @@ function doClearAll() {
 }
 $('#btn-clear').onclick = clearAll;
 
+/**
+ * 把读到的项目数据规范化为当前版本结构。
+ * 草稿恢复（loadDraft）与 JSON 导入（applyProjectData）**必须共用这一套**，
+ * 否则两边补齐字段的规则不一致，会出现「导入后某些设置丢失」。
+ * 用于兼容旧草稿 / 手改过的 JSON：缺失的字段一律用默认值补齐。
+ */
+function normalizeProject(p) {
+  const base = emptyProject();
+  const out = Object.assign(base, p || {});
+  out.id = 'current';
+  out.rules = (p && p.rules && p.rules.length)
+    ? p.rules
+    : JSON.parse(JSON.stringify(DEFAULT_RULES));
+  out.typography = Object.assign({}, DEFAULT_TYPO, (p && p.typography) || {});
+  out.split = Object.assign({ preset: 'cn', custom: '' }, (p && p.split) || {});
+  out.meta = Object.assign({}, base.meta, (p && p.meta) || {});
+  // 章节与图片必须是数组，且每项带必要字段
+  out.chapters = Array.isArray(p && p.chapters)
+    ? p.chapters.map(c => ({
+        id: c && c.id ? c.id : uid('ch'),
+        title: (c && c.title) || '',
+        html: (c && c.html) || '',
+        enabled: c && c.enabled !== false
+      }))
+    : [];
+  out.assets = Array.isArray(p && p.assets)
+    ? p.assets.filter(a => a && a.dataUrl)
+    : [];
+  return out;
+}
+/** 把规范化后的项目装载进 state 并刷新界面 */
+function applyProjectData(p, toastMsg) {
+  state.project = normalizeProject(p);
+  state.currentId = state.project.chapters.length ? state.project.chapters[0].id : null;
+  state.sourceMode = false;
+  $('#src-area').classList.remove('show');
+  $('#src-area').value = '';
+  $('#editor').style.display = '';
+  $('#tb-source').classList.remove('on');
+  afterLoad();
+  saveSoon();
+  if (toastMsg) toast(toastMsg, 'ok');
+}
 async function loadDraft() {
   try {
     const p = await idbGet('current');
     if (p && p.chapters && p.chapters.length) {
-      state.project = Object.assign(emptyProject(), p);
-      state.project.rules = (p.rules && p.rules.length) ? p.rules : JSON.parse(JSON.stringify(DEFAULT_RULES));
-      state.project.typography = Object.assign({}, DEFAULT_TYPO, p.typography || {});
-      state.project.split = Object.assign({ preset: 'cn', custom: '' }, p.split || {});
-      state.currentId = state.project.chapters[0].id;
-      afterLoad();
-      toast('已恢复上次的草稿', 'ok');
+      applyProjectData(p, '已恢复上次的草稿');
       return true;
     }
   } catch (e) { /* 忽略 */ }
   return false;
 }
+/** 解析工程 JSON 字符串，返回规范化后的项目；失败时抛错 */
+function parseProjectJson(text) {
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error('不是有效的 JSON 文件'); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('工程文件应是一个 JSON 对象');
+  }
+  if (!Array.isArray(data.chapters)) {
+    throw new Error('缺少 chapters（章节）字段，可能不是本工具导出的工程');
+  }
+  return normalizeProject(data);
+}
+/** 读取工程 JSON 文件并导入（会覆盖当前内容，需二次确认） */
+function importProjectFile(file) {
+  if (!file) return;
+  const fr = new FileReader();
+  fr.onerror = () => toast('读取文件失败', 'err');
+  fr.onload = () => {
+    let proj;
+    try { proj = parseProjectJson(fr.result); }
+    catch (e) { toast('导入失败：' + e.message, 'err'); return; }
+    const nCh = proj.chapters.length;
+    const nImg = proj.assets.length;
+    const name = proj.meta.title || '(未命名)';
+    // 覆盖前确认：会丢失当前未保存的内容
+    openModal('导入工程',
+      '<p style="margin-top:0">即将导入：</p>' +
+      '<ul style="margin:.4em 0 1em; padding-left:1.4em; color:var(--muted); line-height:1.8">' +
+      '<li>书名：<b>' + esc(name) + '</b></li>' +
+      '<li><b>' + nCh + '</b> 个章节</li>' +
+      '<li><b>' + nImg + '</b> 张图片</li>' +
+      '</ul>' +
+      '<p class="hint">导入将<b>覆盖当前工程</b>（含未保存的修改）。建议先「导出 JSON」备份。</p>',
+      [
+        { text: '取消' },
+        { text: '覆盖导入', kind: 'primary', onClick: () => {
+          saveSoon.cancel();          // 作废待执行的自动保存，避免把旧内容写回草稿
+          applyProjectData(proj, '已导入：' + nCh + ' 章 · ' + nImg + ' 张图片');
+        }}
+      ]
+    );
+  };
+  fr.readAsText(file);
+}
 $('#btn-save-project').onclick = () => {
-  openModal('保存工程', '<p class="hint" style="margin-top:0">草稿保存在本机浏览器（IndexedDB），刷新或关闭页面后仍可恢复。也可导出为 JSON 文件备份。</p>', [
-    { text: '取消' },
-    { text: '导出 JSON', onClick: () => {
-      saveEditorToState();
-      const data = JSON.stringify(state.project, null, 2);
-      downloadBlob(new Blob([data], { type: 'application/json' }),
-        sanitizeFileName(state.project.meta.title || 'project') + '.json');
-      toast('工程已导出');
-    }},
-    { text: '保存到本机', kind: 'primary', onClick: () => saveProject() }
-  ]);
+  openModal('保存工程',
+    '<p class="hint" style="margin-top:0">草稿保存在本机浏览器（IndexedDB），刷新或关闭页面后仍可恢复。也可导出为 JSON 文件备份，之后用「导入 JSON」还原。</p>',
+    [
+      { text: '取消' },
+      { text: '导出 JSON', onClick: () => {
+        saveEditorToState();
+        const data = JSON.stringify(state.project, null, 2);
+        downloadBlob(new Blob([data], { type: 'application/json' }),
+          sanitizeFileName(state.project.meta.title || 'project') + '.json');
+        toast('工程已导出');
+      }},
+      { text: '导入 JSON', onClick: () => $('#project-input').click() },
+      { text: '保存到本机', kind: 'primary', onClick: () => saveProject() }
+    ]
+  );
 };
+$('#project-input').addEventListener('change', function () {
+  if (this.files && this.files[0]) importProjectFile(this.files[0]);
+  this.value = '';   // 允许重复选择同一个文件
+});
 
 /* ------------------------- 21. 导入 TXT ------------------------- */
 let pendingImport = null;
@@ -3059,10 +3249,12 @@ window.addEventListener('drop', (e) => {
   const txts = files.filter(f => /\.txt$/i.test(f.name) || f.type === 'text/plain');
   const imgs = files.filter(f => /^image\//.test(f.type));
   const epubs = files.filter(f => /\.epub$/i.test(f.name));
+  const jsons = files.filter(f => /\.json$/i.test(f.name));
   if (epubs.length) importEpubFile(epubs[0]);
   else if (txts.length) importTxtFiles(txts);
+  else if (jsons.length) importProjectFile(jsons[0]);   // 拖入 .json 也视为工程导入
   else if (imgs.length && state.currentId) addImageFiles(imgs);
-  else toast('仅支持 .txt / .epub / 图片文件');
+  else toast('仅支持 .txt / .epub / .json / 图片文件');
 });
 $('#dropzone').addEventListener('click', (e) => { if (e.target.id === 'dropzone') $('#dropzone').classList.remove('show'); });
 /* 主题 */
